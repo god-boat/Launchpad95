@@ -53,6 +53,10 @@ class Colors:
             On = Rgb.MINT
             Off = Rgb.MINT_THIRD
 
+        class Transport:
+            On = Rgb.RED
+            Off = Rgb.RED_THIRD
+
     class Session:
         # scene
         SceneTriggered = Rgb.GREEN_BLINK
@@ -599,7 +603,18 @@ class Colors:
             Selected = Rgb.RED
             Note = Rgb.RED_HALF
             Tripplet = Rgb.RED_THIRD
-
+            
+    class Transport:
+        PlayOn = Rgb.GREEN
+        PlayOff = Rgb.GREEN_THIRD
+        StopOn = Rgb.RED
+        StopOff = Rgb.RED_THIRD
+        RecordOn = Rgb.RED_BLINK
+        RecordOff = Rgb.RED_THIRD
+        LoopOn = Rgb.YELLOW
+        LoopOff = Rgb.YELLOW_THIRD
+        MetronomeOn = Rgb.YELLOW
+        MetronomeOff = Rgb.YELLOW_THIRD
 
 def make_skin():
     return Skin(Colors)

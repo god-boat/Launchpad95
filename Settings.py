@@ -1,4 +1,3 @@
-
 class Settings():
     # Add Stop buttons at the bottom of the Session. Experimental
     # SESSION__STOP_BUTTONS = True
@@ -13,7 +12,7 @@ class Settings():
     STEPSEQ__LINK_WITH_SESSION = False
 
     # Should the step sequencer scroll automatically to the currently playing page
-    STEPSEQ__AUTO_SCROLL = False
+    STEPSEQ__AUTO_SCROLL = True
 
     # configure what user modes buttons do.
     # the 3 first value configure the 3 sub modes of button user mode 1,
@@ -21,12 +20,12 @@ class Settings():
     USER_MODES_1 = [
 		"instrument"
 		, "device"
-		# ,"user 1"
+		,"user 1"
     ]
     USER_MODES_2 = [
 		"drum stepseq"
 		, "melodic stepseq"
-		# ,"user 2"
+		,"user 2"
     ]
 
     # Device control mode
@@ -38,7 +37,7 @@ class Settings():
     # used for the gradient of the parameter change
     # the higher the value, the slower the parameter change
     VELOCITY_FACTOR = (127 ** 2) * (127 / 2)
-    USE_CUSTOM_DEVICE_CONTROL_COLORS = False
+    USE_CUSTOM_DEVICE_CONTROL_COLORS = True
     # time sensitive stepless fader
     ENABLE_TDC = True
     # Time you have to keep the button pressed for the slowest velocity

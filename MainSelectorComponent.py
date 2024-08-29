@@ -13,6 +13,7 @@ from .StepSequencerComponent2 import StepSequencerComponent2
 from .NoteRepeatComponent import NoteRepeatComponent
 from _Framework.SceneComponent import SceneComponent
 from .SpecialProSessionComponent import SpecialProSessionComponent
+from .TransportControlComponent import TransportControlComponent
 import Live
 import time
 try:
@@ -59,7 +60,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 		#initialize index variables
 		self._mode_index = 0 #Inherited from parent
 		self._main_mode_index = 0 #LP original modes
-		self._sub_mode_list = [0, 0, 0, 0]
+		self._sub_mode_list = [0, 0, 0, 0]  # Initialize submode list for all main modes
 		for index in range(4):
 			self._sub_mode_list[index] = 0
 		self.set_mode_buttons(self._mode_buttons)
@@ -108,6 +109,10 @@ class MainSelectorComponent(ModeSelectorComponent):
 		#User1 Device controller (Fx or Instrument parameters)
 		self._device_controller = DeviceControllerComponent(control_surface = self._control_surface, matrix = self._matrix, side_buttons = self._side_buttons, top_buttons =  self._nav_buttons)
 		self._device_controller.set_osd(self._osd)
+
+		#transport control
+		self._transport_controller = TransportControlComponent(control_surface)
+		self._transport_mode = False
 
 		self._init_session()
 		self._all_buttons = tuple(self._all_buttons)
@@ -165,20 +170,46 @@ class MainSelectorComponent(ModeSelectorComponent):
 		assert len(self._modes_buttons) > 0
 		assert isinstance(value, int)
 		assert sender in self._modes_buttons
-		session_mode_changed = False
+
 		new_mode = self._modes_buttons.index(sender)
-		now = int(round(time.time() * 1000))
-		if new_mode == 0 and self._last_mode_index == 0:
-			if value > 0:
-				self._last_session_mode_button_press = now
-			else: 
-				if now - self._last_session_mode_button_press < self._long_press:
+
+		if value != 0:  # Button pressed
+			if new_mode == self._main_mode_index:
+				# Toggle submodes only when pressing the same mode button
+				if new_mode == 0:  # Session mode
 					self._pro_session_on = not self._pro_session_on
-					session_mode_changed = True
-		self._last_mode_index = new_mode			 
-		super(MainSelectorComponent, self)._mode_value(value, sender)
-		if session_mode_changed == True:
-			self._update_mode() 
+				elif new_mode in [1, 2, 3]:  # User modes and Mixer mode
+					self._sub_mode_list[new_mode] = (self._sub_mode_list[new_mode] + 1) % len(self._get_mode_options(new_mode))
+			else:
+				# Switching to a different mode
+				self._main_mode_index = new_mode
+				self._clear_transport_controls()
+				if new_mode != 3:  # If not switching to Mixer mode
+					self._transport_mode = False
+
+			self._mixer_or_transport_mode = (new_mode == 3)
+			self.update()
+
+		else:  # Button released
+			if new_mode == 3:  # Mixer mode button
+				self._mixer_or_transport_mode = False
+				self.update()
+
+		# Always update transport mode state
+		if self._main_mode_index == 3:
+			self._transport_mode = self._transport_mode
+		else:
+			self._transport_mode = False
+
+	def _get_mode_options(self, mode):
+		if mode == 1:
+			return Settings.USER_MODES_1
+		elif mode == 2:
+			return Settings.USER_MODES_2
+		elif mode == 3:
+			return ["mixer", "transport"]  # Submodes for Mixer mode
+		else:
+			return ["default"]
 
 	def number_of_modes(self):
 		return 1 + 3 + 3 + 1
@@ -251,8 +282,10 @@ class MainSelectorComponent(ModeSelectorComponent):
 	def update(self):
 		assert (self._modes_buttons != None)
 		if self.is_enabled():
-
 			self._update_mode_buttons()
+
+			# Clear all matrix buttons
+			self._clear_matrix()
 
 			as_active = True
 			as_enabled = True
@@ -267,6 +300,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 					self._control_surface.show_message("PRO SESSION MODE")
 				else:
 					self._control_surface.show_message("SESSION MODE")
+				self._clear_transport_controls()
 				self._setup_mixer(not as_active)
 				self._setup_device_controller(not as_active)
 				self._setup_step_sequencer(not as_active)
@@ -276,33 +310,54 @@ class MainSelectorComponent(ModeSelectorComponent):
 				self._update_control_channels()
 				self._mode_index = 0
 
-			elif self._main_mode_index == 1:
-				self._setup_sub_mode(Settings.USER_MODES_1[self._sub_mode_list[self._main_mode_index]])
-			elif self._main_mode_index == 2:
-				self._setup_sub_mode(Settings.USER_MODES_2[self._sub_mode_list[self._main_mode_index]])
+			elif self._main_mode_index in [1, 2]:
+				# User modes
+				self._setup_sub_mode(self._get_mode_options(self._main_mode_index)[self._sub_mode_list[self._main_mode_index]])
 
 			elif self._main_mode_index == 3:
-				# mixer
-				self._control_surface.show_message("MIXER MODE")
-				self._setup_device_controller(not as_active)
-				self._setup_step_sequencer(not as_active)
-				self._setup_step_sequencer2(not as_active)
-				self._setup_instrument_controller(not as_active)
-				self._setup_session(not as_active, as_enabled)
-				self._setup_mixer(as_active)
+				# Mixer mode
+				if self._sub_mode_list[3] == 1:  # Transport submode
+					self._control_surface.show_message("TRANSPORT MODE")
+					self._setup_device_controller(not as_active)
+					self._setup_step_sequencer(not as_active)
+					self._setup_step_sequencer2(not as_active)
+					self._setup_instrument_controller(not as_active)
+					self._setup_session(not as_active, as_enabled)
+					self._setup_mixer(not as_active)
+					self._sub_modes.release_controls()
+					self._setup_transport_mode(as_active)
+					self._transport_controller.update()
+				else:  # Mixer submode
+					self._control_surface.show_message("MIXER MODE")
+					self._clear_transport_controls()
+					self._setup_device_controller(not as_active)
+					self._setup_step_sequencer(not as_active)
+					self._setup_step_sequencer2(not as_active)
+					self._setup_instrument_controller(not as_active)
+					self._setup_session(not as_active, as_enabled)
+					self._setup_mixer(as_active)
 				self._update_control_channels()
 				self._mode_index = 3
+
 			else:
 				assert False
 
 			self._session.set_allow_update(True)
 			self._zooming.set_allow_update(True)
-		
+
+	def _clear_matrix(self):
+		if self._matrix:
+			for scene_index in range(8):
+				for track_index in range(8):
+					button = self._matrix.get_button(track_index, scene_index)
+					button.set_light("DefaultButton.Disabled")
+
 	def _setup_sub_mode(self, mode):
 		as_active = True
 		as_enabled = True
 		if mode == "instrument":
 			self._control_surface.show_message("INSTRUMENT MODE")
+			self._clear_transport_controls()
 			self._setup_session(not as_active, not as_enabled)
 			self._setup_step_sequencer(not as_active)
 			self._setup_step_sequencer2(not as_active)
@@ -313,6 +368,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 			self._mode_index = 4
 		elif mode == "melodic stepseq":
 			self._control_surface.show_message("MELODIC SEQUENCER MODE")
+			self._clear_transport_controls()
 			self._setup_session(not as_active, not as_enabled)
 			self._setup_instrument_controller(not as_active)
 			self._setup_device_controller(not as_active)
@@ -323,6 +379,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 			self._mode_index = 7
 		elif mode == "user 1":
 			self._control_surface.show_message("USER 1 MODE" )
+			self._clear_transport_controls()
 			self._setup_session(not as_active, not as_enabled)
 			self._setup_step_sequencer(not as_active)
 			self._setup_step_sequencer2(not as_active)
@@ -337,6 +394,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 			self._osd.update()
 		elif mode == "drum stepseq":
 			self._control_surface.show_message("DRUM STEP SEQUENCER MODE")
+			self._clear_transport_controls()
 			self._setup_session(not as_active, not as_enabled)
 			self._setup_instrument_controller(not as_active)
 			self._setup_device_controller(not as_active)
@@ -347,6 +405,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 			self._mode_index = 6
 		elif mode == "device":
 			self._control_surface.show_message("DEVICE CONTROLLER MODE")
+			self._clear_transport_controls()
 			self._setup_session(not as_active, not as_enabled)
 			self._setup_step_sequencer(not as_active)
 			self._setup_step_sequencer2(not as_active)
@@ -357,6 +416,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 			self._mode_index = 5
 		elif mode == "user 2":
 			self._control_surface.show_message("USER 2 MODE" )
+			self._clear_transport_controls()
 			self._setup_session(not as_active, not as_enabled)
 			self._setup_instrument_controller(not as_active)
 			self._setup_device_controller(not as_active)
@@ -384,7 +444,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 		
 		if (self._session.height() != self._matrix .height()) and (self._aux_scene != None):
 			self._session._scenes.append(self._aux_scene)
-		
+
 		if as_active:
 			self._session._set_pro_mode_on(self._pro_session_on)
 		else:
@@ -555,6 +615,71 @@ class MainSelectorComponent(ModeSelectorComponent):
 				self._sub_modes.release_controls()
 
 		self._sub_modes.set_enabled(as_active)
+		
+	def _setup_transport_mode(self, as_active):
+		self._transport_controller.set_enabled(as_active)
+		if as_active:
+			self._sub_modes.release_controls()  # Clear mixer controls
+			self._setup_transport_controls()
+			self._update_transport_buttons()
+			self._transport_controller.update()  
+		else:
+			self._clear_transport_controls()
+
+	def _setup_transport_controls(self):
+		# Clear all matrix buttons
+		for scene_index in range(8):
+			for track_index in range(8):
+				button = self._matrix.get_button(track_index, scene_index)
+				button.set_on_off_values("DefaultButton.Disabled", "DefaultButton.Disabled")
+				button.turn_off()
+
+		play_button = self._matrix.get_button(0, 0)
+		stop_button = self._matrix.get_button(1, 0)
+		record_button = self._matrix.get_button(2, 0)
+		loop_button = self._matrix.get_button(3, 0)
+		metronome_button = self._matrix.get_button(4, 0)
+
+		play_button.set_on_off_values("Transport.PlayOn", "Transport.PlayOff")
+		stop_button.set_on_off_values("Transport.StopOn", "Transport.StopOff")
+		record_button.set_on_off_values("Transport.RecordOn", "Transport.RecordOff")
+		loop_button.set_on_off_values("Transport.LoopOn", "Transport.LoopOff")
+		metronome_button.set_on_off_values("Transport.MetronomeOn", "Transport.MetronomeOff")
+
+		self._transport_controller.set_play_button(play_button)
+		self._transport_controller.set_stop_button(stop_button)
+		self._transport_controller.set_record_button(record_button)
+		self._transport_controller.set_loop_button(loop_button)
+		self._transport_controller.set_metronome_button(metronome_button)
+
+	def _update_transport_buttons(self):
+		# Clear all matrix buttons
+		for scene_index in range(8):
+			for track_index in range(8):
+				button = self._matrix.get_button(track_index, scene_index)
+				button.set_on_off_values("DefaultButton.Disabled", "DefaultButton.Disabled")
+				button.turn_off()
+
+		play_button = self._matrix.get_button(0, 0)
+		stop_button = self._matrix.get_button(1, 0)
+		record_button = self._matrix.get_button(2, 0)
+		loop_button = self._matrix.get_button(3, 0)
+		metronome_button = self._matrix.get_button(4, 0)
+
+		play_button.set_on_off_values("Transport.PlayOn", "Transport.PlayOff")
+		stop_button.set_on_off_values("Transport.StopOn", "Transport.StopOff")
+		record_button.set_on_off_values("Transport.RecordOn", "Transport.RecordOff")
+		loop_button.set_on_off_values("Transport.LoopOn", "Transport.LoopOff")
+		metronome_button.set_on_off_values("Transport.MetronomeOn", "Transport.MetronomeOff")
+
+		self._transport_controller.update()
+
+	def _clear_transport_controls(self):
+		self._transport_controller.set_play_button(None)
+		self._transport_controller.set_stop_button(None)
+		self._transport_controller.set_record_button(None)
+		self._transport_controller.set_loop_button(None)
+		self._transport_controller.set_metronome_button(None)
 
 	def _init_session(self):
 		#self._session.set_stop_clip_value("Session.StopClip")
