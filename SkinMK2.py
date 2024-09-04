@@ -57,6 +57,23 @@ class Colors:
             On = Rgb.RED
             Off = Rgb.RED_THIRD
 
+    class ClipLooper:
+        Playhead = Rgb.GREEN_PULSE
+        InLoop = Rgb.BLUE_HALF
+        OutLoop = Rgb.RED_THIRD
+        Disabled = Rgb.BLACK
+        LoopOn = Rgb.PURPLE_HALF
+        LoopOff = Rgb.BLACK
+        ClipSelected = Rgb.LIGHT_BLUE
+        ClipLooper = Rgb.PURPLE
+        SetLoop = Rgb.AMBER_THIRD
+        MoveLeft = Rgb.BLUE_THIRD
+        MoveRight = Rgb.BLUE_HALF
+        DoubleLoop = Rgb.PURPLE_HALF
+        HalveLoop = Rgb.PURPLE_THIRD
+        LoopStart = Rgb.PURPLE_HALF
+        LoopEnd = Rgb.PURPLE_THIRD
+
     class Session:
         # scene
         SceneTriggered = Rgb.GREEN_BLINK

@@ -17,6 +17,7 @@ class ButtonSliderElement(SliderElement, SlotManager):
     _last_sent_value = -1
 
     def __init__(self, buttons):
+        print("BUTTON SLIDER INIT")
         SliderElement.__init__(self, MIDI_INVALID_TYPE, 0, 0)
         self._parameter_value_slot = self.register_slot(None, self._on_parameter_changed, 'value')
         self._buttons = buttons
