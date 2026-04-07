@@ -7,6 +7,9 @@ class Settings():
     # SESSION__LINK = True
     SESSION__LINK = False
 
+    # Show disabled clips in session
+    SESSION__SHOW_DISABLED_CLIPS = False
+
     # Link stepseq to follow session. Experimental
     # STEPSEQ__LINK_WITH_SESSION = True
     STEPSEQ__LINK_WITH_SESSION = False

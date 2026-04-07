@@ -1,6 +1,7 @@
 from _Framework.ClipSlotComponent import ClipSlotComponent
 from _Framework.Util import in_range
-
+from .Settings import Settings
+ 
 class ClipSlotMK2(ClipSlotComponent):
 	
 	def update(self):
@@ -29,9 +30,14 @@ class ClipSlotMK2(ClipSlotComponent):
 			ret["channel"] = 0
 			track = self._clip_slot.canonical_parent
 			slot_or_clip = self._clip_slot.clip if self.has_clip() else self._clip_slot
-	
+			
+			# Apply stopped value only if disabled clips should be shown
 			if getattr(slot_or_clip, 'controls_other_clips', True) and self._stopped_value != None:
 				ret["value"] = self._stopped_value
+
+			# Keep muted clips hidden consistently with the pro session component.
+			if self.has_clip() and self._clip_slot.clip.muted and not Settings.SESSION__SHOW_DISABLED_CLIPS:
+				return None
 			if self._track_is_armed(track) and self._clip_slot.has_stop_button and self._record_button_value != None:
 				ret["value"] = self._record_button_value
 				

@@ -14,6 +14,7 @@ import time
 from .SpecialProSessionRecordingComponent import SpecialProSessionRecordingComponent
 from .SpecialSessionComponent import SpecialSessionComponent
 from .TargetTrackComponent import TargetTrackComponent
+from .Settings import Settings
 _Q = Live.Song.Quantization
 Rec_Q = Live.Song.RecordingQuantization
 try:
@@ -241,6 +242,11 @@ class SpecialClipSlotComponent(ClipSlotComponent):
 
 	def _feedback_value(self):
 		ret = super(SpecialClipSlotComponent, self)._feedback_value()
+		# Hide muted clips if option disabled
+		if self._clip_slot and self._clip_slot.has_clip:
+			if self._clip_slot.clip.muted and not Settings.SESSION__SHOW_DISABLED_CLIPS:
+				return None
+		# Maintain foldable track special coloring
 		if self._clip_slot and ret == 'ProSession.ClipStopped':
 			track = self._clip_slot.canonical_parent
 			if track.is_foldable:
