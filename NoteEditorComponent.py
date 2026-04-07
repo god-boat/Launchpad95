@@ -349,14 +349,34 @@ class NoteEditorComponent(ControlSurfaceComponent):
 				if(self._is_velocity_shifted):
 					self._velocity_notes_pressed = self._velocity_notes_pressed + 1 #Just changing some note velocity
 
-				# note data
-
-				if self.is_multinote: # Calculate note pitch and time for notes 
+				# --- MODIFICATION START ---
+				if self.is_multinote: # Calculate note pitch and time for notes (Multinote mode)
 					time = self.quantization * (self._page * self.width * self.number_of_lines_per_note + x + (y % self.number_of_lines_per_note * self.width))
-					pitch = self._key_indexes[int(8 / self.number_of_lines_per_note - 1 - y / self.number_of_lines_per_note)]
-				else:
+					# Use try-except for safety as key_indexes might not map perfectly
+					try:
+						pitch_index = int(8 / self.number_of_lines_per_note - 1 - y / self.number_of_lines_per_note)
+						if 0 <= pitch_index < len(self._key_indexes):
+							pitch = self._key_indexes[pitch_index]
+						else:
+							pitch = -1 # Invalid pitch index
+					except (IndexError, TypeError, ValueError): # Added ValueError for robustness
+						pitch = -1 # Error getting pitch
+				else: # Standard Step Sequencer Mode (StepSequencerComponent.py in melodic or drum mode)
+					# Get pitch from the NoteSelectorComponent via the parent StepSequencerComponent
+					if self._stepsequencer and hasattr(self._stepsequencer, '_note_selector') and self._stepsequencer._note_selector:
+						pitch = self._stepsequencer._note_selector.selected_note
+					else:
+						pitch = -1 # Fallback if selector isn't available
+
+					# Time calculation depends on the layout (seems to map y rows sequentially through pages)
 					time = self.quantization * (self._page * self.width * self.number_of_lines_per_note + y * self.width + x)
-					pitch = self._key_indexes[0]
+
+				# Ensure pitch is valid (MIDI range 0-127) before proceeding
+				if not (0 <= pitch <= 127):
+					self._control_surface.log_message(f"NoteEditor: Invalid pitch ({pitch}) selected.")
+					return # Exit if pitch is invalid or couldn't be determined
+				# --- MODIFICATION END ---
+
 				velocity = self._velocity #setted by velocity button
 				duration = self.quantization #setted by quantization button in StepSequencerComponent
 
@@ -422,7 +442,7 @@ class NoteEditorComponent(ControlSurfaceComponent):
 		assert (self._velocity_button != None)
 		assert (value in range(128))
 		if self.is_enabled():
-			if ((value is 0) or (not sender.is_momentary())):
+			if ((value == 0) or (not sender.is_momentary())):
 				# button released, check if was used to modify notes or just to cycle thru velocity values
 				if self._velocity_notes_pressed == 0 and time.time() - self._velocity_last_press < self.long_button_press:
 					# cycle thru velocities
@@ -433,7 +453,7 @@ class NoteEditorComponent(ControlSurfaceComponent):
 					self._stepsequencer._track_controller._do_implicit_arm(False)
 				self._is_velocity_shifted = False
 				self._update_velocity_button()
-			if ((value is not 0) or (not sender.is_momentary())):
+			if ((value != 0) or (not sender.is_momentary())):
 				# button pressed
 				self._velocity_notes_pressed = 0
 				self._is_velocity_shifted = True
