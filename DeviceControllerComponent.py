@@ -245,13 +245,15 @@ class DeviceControllerComponent(DeviceComponent):
             stored_device = self._last_selected_device_per_track.get(new_selected_track)
 
             if stored_device is not None and self._is_device_on_track(stored_device, new_selected_track):
+                 stored_device = self._normalize_device_for_navigation(stored_device)
                  # Check if the stored device is different from the currently appointed one
                  # to avoid redundant selection calls if Live already selected it.
-                 if self.song().appointed_device != stored_device:
-                     self.song().view.select_device(stored_device)
-                 # Even if already appointed, ensure our component state is updated
-                 self.set_device(stored_device)
-                 restored_device = True
+                 if stored_device is not None:
+                     if self.song().appointed_device != stored_device:
+                         self.song().view.select_device(stored_device)
+                     # Even if already appointed, ensure our component state is updated
+                     self.set_device(stored_device)
+                     restored_device = True
             else:
                 # Clear invalid entry if it existed
                 if new_selected_track in self._last_selected_device_per_track:
@@ -261,10 +263,16 @@ class DeviceControllerComponent(DeviceComponent):
             if not restored_device:
                 current_track_device = new_selected_track.view.selected_device
                 if current_track_device is not None and self._is_device_on_track(current_track_device, new_selected_track):
+                    current_track_device = self._normalize_device_for_navigation(current_track_device)
                     # If Live already selected a valid device on this track, use it
-                    self.set_device(current_track_device)
-                    # Also update storage for this track
-                    self._last_selected_device_per_track[new_selected_track] = current_track_device
+                    if current_track_device is not None:
+                        if self.song().appointed_device != current_track_device:
+                            self.song().view.select_device(current_track_device)
+                        self.set_device(current_track_device)
+                        # Also update storage for this track
+                        self._last_selected_device_per_track[new_selected_track] = current_track_device
+                    else:
+                        self.select_first_device()
                 else:
                     # Otherwise, select the first device
                     self.select_first_device()
@@ -670,6 +678,72 @@ class DeviceControllerComponent(DeviceComponent):
 
     # DEVICES
 
+    def _is_rack_open_for_navigation(self, device):
+        if not isinstance(device, Live.Device.Device):
+            return False
+        if not getattr(device, 'can_have_chains', False) or len(device.chains) == 0:
+            return False
+        if not hasattr(device, 'view'):
+            return False
+        if getattr(device.view, 'is_collapsed', False):
+            return False
+        if not getattr(device.view, 'is_showing_chain_devices', False):
+            return False
+        return device.view.selected_chain is not None
+
+    def _visible_device_parent(self, device):
+        if self._is_rack_open_for_navigation(device):
+            return device.view.selected_chain
+        return None
+
+    def _collect_visible_devices(self, track_or_chain, visible_devices=None):
+        if visible_devices is None:
+            visible_devices = []
+        devices = list(track_or_chain.devices) if track_or_chain is not None and hasattr(track_or_chain, 'devices') else []
+        for child_device in devices:
+            visible_devices.append(child_device)
+            nested_parent = self._visible_device_parent(child_device)
+            if nested_parent is not None:
+                self._collect_visible_devices(nested_parent, visible_devices)
+        return visible_devices
+
+    def _visible_devices(self):
+        track = self.selected_track()
+        if track is None:
+            return []
+        return self._collect_visible_devices(track, [])
+
+    def _normalize_device_for_navigation(self, device, visible_devices=None):
+        if not isinstance(device, Live.Device.Device):
+            return None
+        if visible_devices is None:
+            visible_devices = self._visible_devices()
+        if device in visible_devices:
+            return device
+        current_device = device
+        while isinstance(current_device, Live.Device.Device):
+            parent = current_device.canonical_parent
+            if not isinstance(parent, Live.Chain.Chain):
+                break
+            current_device = parent.canonical_parent
+            if current_device in visible_devices:
+                return current_device
+        return None
+
+    def _get_device_by_offset(self, device, offset):
+        visible_devices = self._visible_devices()
+        if len(visible_devices) == 0:
+            return None
+        if device is None:
+            return visible_devices[0] if offset > 0 else visible_devices[-1]
+        normalized_device = self._normalize_device_for_navigation(device, visible_devices)
+        if normalized_device is None:
+            return visible_devices[0] if offset > 0 else visible_devices[-1]
+        index = visible_devices.index(normalized_device) + offset
+        if index >= 0 and index < len(visible_devices):
+            return visible_devices[index]
+        return None
+
     def update_device_buttons(self):
         if self.is_enabled():
             if self._prev_device_button is not None:
@@ -740,87 +814,10 @@ class DeviceControllerComponent(DeviceComponent):
                         self.update()
 
     def _get_next_device(self, device):
-        if device is None:
-            return self.selected_track().devices[0] if len(self.selected_track().devices) > 0 else None
-        if isinstance(device, Live.Device.Device):
-            if device.can_have_chains and len(device.chains) > 0:
-                return device.chains[0].devices[0]
-            else:
-                next_device = self._get_next_sibling_device(device)
-                if next_device:
-                    return next_device
-                else:
-                    return self._get_next_device_from_parent(device)
-        return None
+        return self._get_device_by_offset(device, 1)
 
     def _get_previous_device(self, device):
-        if device is None:
-            return self.selected_track().devices[-1] if len(self.selected_track().devices) > 0 else None
-        if isinstance(device, Live.Device.Device):
-            previous_sibling = self._get_previous_sibling_device(device)
-            if previous_sibling:
-                return self._get_last_device_in_chain(previous_sibling)
-            elif device.canonical_parent and isinstance(device.canonical_parent, Live.Chain.Chain):
-                return device.canonical_parent.canonical_parent
-            else:
-                return self._get_previous_device_from_parent(device)
-        return None
-
-    def _get_next_sibling_device(self, device):
-        parent = device.canonical_parent
-        if isinstance(parent, Live.Chain.Chain):
-            devices = parent.devices
-            index = list(devices).index(device)
-            if index + 1 < len(devices):
-                return devices[index + 1]
-            elif isinstance(parent.canonical_parent, Live.Device.Device):
-                return self._get_next_sibling_device(parent.canonical_parent)
-            elif isinstance(parent.canonical_parent, Live.Track.Track):
-                return self._get_next_device(None)
-        return None
-
-    def _get_previous_sibling_device(self, device):
-        parent = device.canonical_parent
-        if isinstance(parent, Live.Chain.Chain):
-            devices = parent.devices
-            index = list(devices).index(device)
-            if index > 0:
-                return devices[index - 1]
-        return None
-
-    def _get_last_device_in_chain(self, device):
-        if isinstance(device, Live.Device.Device):
-            if device.can_have_chains and len(device.chains) > 0:
-                return self._get_last_device_in_chain(device.chains[-1].devices[-1])
-            else:
-                return device
-        return None
-
-    def _get_next_device_from_parent(self, device):
-        parent = device.canonical_parent
-        if isinstance(parent, Live.Chain.Chain):
-            parent_device = parent.canonical_parent
-            if isinstance(parent_device, Live.Device.Device):
-                next_sibling = self._get_next_sibling_device(parent_device)
-                if next_sibling:
-                    return next_sibling
-                else:
-                    return self._get_next_device_from_parent(parent_device)
-        elif isinstance(parent, Live.Track.Track):
-            devices = list(parent.devices)
-            if device in devices and devices.index(device) < len(devices) - 1:
-                return devices[devices.index(device) + 1]
-        return None
-
-    def _get_previous_device_from_parent(self, device):
-        parent = device.canonical_parent
-        if isinstance(parent, Live.Chain.Chain):
-            return parent.canonical_parent
-        elif isinstance(parent, Live.Track.Track):
-            devices = list(parent.devices)
-            if device in devices and devices.index(device) > 0:
-                return self._get_last_device_in_chain(devices[devices.index(device) - 1])
-        return None
+        return self._get_device_by_offset(device, -1)
 
     @property
     def selected_device_idx(self):
