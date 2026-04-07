@@ -289,10 +289,8 @@ class InstrumentControllerComponent(CompoundComponent):
 
 	#Enables scale selection mode
 	def _scales_toggle(self, value, sender):
-		self._control_surface.log_message(f"InstrumentController DEBUG: ENTER _scales_toggle: value={value}")
 		if self.is_enabled():
 			if (value != 0):
-				self._control_surface.log_message(f"InstrumentController DEBUG: _scales_toggle PRESSED (value={value})")
 				self._get_drumrack_device()
 				if(self._scales.is_drumrack and self._drum_group_device != None):
 					self._toggle_note_repeat_selector()
@@ -305,7 +303,6 @@ class InstrumentControllerComponent(CompoundComponent):
 					self._scales_toggle_button.turn_on()
 					self._scales.update()
 			else:
-				self._control_surface.log_message(f"InstrumentController DEBUG: _scales_toggle RELEASED (value={value})")
 				self._scales_toggle_button.turn_off()
 				self._scales.set_enabled(False)
 				self._osd.mode = self._osd_mode_backup
