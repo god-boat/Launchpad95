@@ -37,6 +37,7 @@ class DeviceControllerComponent(DeviceComponent):
         self._last_mode_toggle_button_press = time.time()
         self._precision_mode = False
         self._stepless_mode = Settings.DEVICE_CONTROLLER__STEPLESS_MODE
+        self._focus_locked_device_on_select = Settings.DEVICE_CONTROLLER__FOCUS_LOCKED_DEVICE_ON_SELECT
 
         # Lock logic
         self._lock_button_slots = [None, None, None, None]
@@ -234,6 +235,28 @@ class DeviceControllerComponent(DeviceComponent):
             else: # Reached something else (like Application) before the track
                  break
         return False
+
+    def _get_device_track(self, device):
+        if not isinstance(device, Live.Device.Device):
+            return None
+        for track in tuple(self.song().tracks) + tuple(self.song().return_tracks):
+            if self._is_device_on_track(device, track):
+                return track
+        return None
+
+    def _focus_locked_device(self, device):
+        if not self._focus_locked_device_on_select:
+            return
+        if not isinstance(device, Live.Device.Device):
+            return
+
+        device_track = self._get_device_track(device)
+        if device_track is not None and self.song().view.selected_track != device_track:
+            self.song().view.selected_track = device_track
+        if self.song().appointed_device != device:
+            self.song().view.select_device(device)
+        if not (hasattr(self._control_surface, '_selector') and self._control_surface._selector and hasattr(self._control_surface._selector, '_transport_mode') and self._control_surface._selector._transport_mode):
+            self.set_device_view()
 
     def on_selected_track_changed(self):
         if not self._is_locked_to_device:
@@ -475,15 +498,15 @@ class DeviceControllerComponent(DeviceComponent):
                                         index + 1) + ")")
                         self._locked_device_index = None
                     elif self._locked_devices[index] is not None:
+                        locked_device = self._locked_devices[index]
                         self._locked_device_index = index
-                        self.set_device(self._locked_devices[index])
-                        if self._locked_devices[index] is not None:
-                            self._control_surface.show_message(
-                                "LOCKED TO '" + self.get_device_track_name(
-                                    self._locked_devices[index]) + " - " + str(
-                                    self._locked_devices[
-                                        index].name) + " (" + str(
-                                    index + 1) + ")")
+                        self.set_device(locked_device)
+                        self._focus_locked_device(locked_device)
+                        self._control_surface.show_message(
+                            "LOCKED TO '" + self.get_device_track_name(
+                                locked_device) + " - " + str(
+                                locked_device.name) + " (" + str(
+                                index + 1) + ")")
                         self.update()
             self.update_track_buttons()
             self.update_device_buttons()
