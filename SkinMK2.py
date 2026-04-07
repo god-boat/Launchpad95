@@ -5,57 +5,62 @@ from .ColorsMK2 import Rgb
 class Colors:
     class DefaultButton:
         On = Rgb.GREEN
-        Off = Rgb.GREEN_THIRD
+        Off = Rgb.BLACK
         Disabled = Rgb.BLACK
+
+    # class ScrollComponent:
+    #     Color = Rgb.GREEN  # Color when scrolling IS possible (button enabled)
+    #     DisabledColor = Rgb.BLACK # Color when scrolling IS NOT possible (button disabled)
+    #     PressedColor = Rgb.WHITE # Optional: Define pressed color, adjust as needed
 
     class Mode:  # mode buttons colour
         class Session:
-            On = Rgb.GREEN
-            Off = Rgb.GREEN_THIRD
+            On = Rgb.DARK_GREY
+            Off = Rgb.BLACK
 
         class ProSession:
             On = Rgb.MINT
-            Off = Rgb.MINT_THIRD
+            Off = Rgb.BLACK
 
         class Note:
             On = Rgb.LIGHT_BLUE
-            Off = Rgb.LIGHT_BLUE_THIRD
+            Off = Rgb.BLACK
 
         class Drum:
             On = Rgb.YELLOW
-            Off = Rgb.YELLOW_HALF
+            Off = Rgb.BLACK
 
         class Device:
             On = Rgb.PURPLE
-            Off = Rgb.PURPLE_THIRD
+            Off = Rgb.BLACK
 
         class StepSequencer:
             On = Rgb.PINK
-            Off = Rgb.PINK_THIRD
+            Off = Rgb.BLACK
 
         class StepSequencer2:
             On = Rgb.AMBER
-            Off = Rgb.AMBER_THIRD
+            Off = Rgb.BLACK
 
         class User:
             On = Rgb.BLUE
-            Off = Rgb.BLUE_THIRD
+            Off = Rgb.BLACK
 
         class User2:
             On = Rgb.BLUE
-            Off = Rgb.BLUE_THIRD
+            Off = Rgb.BLACK
 
         class Mixer:
             On = Rgb.MINT
-            Off = Rgb.MINT_THIRD
+            Off = Rgb.BLACK
 
         class Track:  # used in device component
             On = Rgb.MINT
-            Off = Rgb.MINT_THIRD
+            Off = Rgb.BLACK
 
         class Transport:
             On = Rgb.RED
-            Off = Rgb.RED_THIRD
+            Off = Rgb.BLACK
 
     class ClipLooper:
         Playhead = Rgb.GREEN_PULSE
@@ -66,13 +71,15 @@ class Colors:
         LoopOff = Rgb.BLACK
         ClipSelected = Rgb.LIGHT_BLUE
         ClipLooper = Rgb.PURPLE
-        SetLoop = Rgb.AMBER_THIRD
-        MoveLeft = Rgb.BLUE_THIRD
-        MoveRight = Rgb.BLUE_HALF
-        DoubleLoop = Rgb.PURPLE_HALF
-        HalveLoop = Rgb.PURPLE_THIRD
-        LoopStart = Rgb.PURPLE_HALF
-        LoopEnd = Rgb.PURPLE_THIRD
+        SetLoop = Rgb.LIGHT_BLUE_THIRD
+        MoveLeft = Rgb.DARK_GREY
+        MoveRight = Rgb.DARK_GREY
+        DoubleLoop = Rgb.LIGHT_BLUE_HALF
+        HalveLoop = Rgb.LIGHT_BLUE_THIRD
+        LoopStart = Rgb.GREY
+        LoopEnd = Rgb.GREY
+        ShrinkLoop = Rgb.DARK_GREY
+        GrowLoop = Rgb.DARK_GREY
 
     class Session:
         # scene
@@ -536,9 +543,9 @@ class Colors:
 
         class Pads:
             Root = Rgb.BLUE
-            InScale = Rgb.LIGHT_BLUE_HALF
-            Highlight = Rgb.LIGHT_BLUE
-            OutOfScale = Rgb.DARK_GREY
+            InScale = Rgb.DARK_GREY
+            Highlight = Rgb.GREY
+            OutOfScale = Rgb.BLACK
             Invalid = Rgb.BLACK
 
     class Scale:  # scale edition
@@ -632,6 +639,8 @@ class Colors:
         LoopOff = Rgb.YELLOW_THIRD
         MetronomeOn = Rgb.YELLOW
         MetronomeOff = Rgb.YELLOW_THIRD
+        TempoUp = Rgb.DARK_GREY
+        TempoDown = Rgb.DARK_GREY
 
 def make_skin():
     return Skin(Colors)
