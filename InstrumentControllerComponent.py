@@ -3,6 +3,7 @@ from _Framework.CompoundComponent import CompoundComponent
 from _Framework.SubjectSlot import subject_slot
 from _Framework.ButtonElement import ButtonElement
 from _Framework.Util import find_if, clamp
+from ableton.v2.base import liveobj_valid
 try:
 	from itertools import imap
 except ImportError:
@@ -26,6 +27,20 @@ from _Framework.ButtonMatrixElement import ButtonMatrixElement
 KEY_MODE = 0
 SCALE_TYPE_MODE = 1
 
+# Add necessary imports for color handling
+from .ColorsMK2 import CLIP_COLOR_TABLE, RGB_COLOR_TABLE, Rgb # Assuming RGB_COLOR_TABLE exists or adapt as needed
+
+# Add ABLETON_TO_LAUNCHPAD_COLORS if needed, or rely on find_closest_color logic
+# Example based on ClipLooperComponent - adjust if your color definitions differ
+ABLETON_TO_LAUNCHPAD_COLORS = {
+    0: 72, 1: 96, 2: 100, 3: 98, 4: 122, 5: 21, 6: 37, 7: 45, 8: 105, 9: 105,
+    10: 113, 11: 95, 12: 95, 13: 3, 14: 5, 15: 84, 16: 11, 17: 13, 18: 76, 19: 21,
+    20: 37, 21: 45, 22: 105, 23: 47, 24: 115, 25: 116, 26: 95, 27: 118, 28: 106, 29: 97,
+    30: 99, 31: 121, 32: 123, 33: 123, 34: 123, 35: 49, 36: 49, 37: 113, 38: 116, 39: 116,
+    40: 119, 41: 2, 42: 107, 43: 11, 44: 11, 45: 99, 46: 76, 47: 76, 48: 45, 49: 49,
+    50: 104, 51: 104, 52: 116, 53: 116, 54: 106, 55: 1, 56: 7, 57: 11, 58: 83, 59: 100,
+    60: 28, 61: 28, 62: 45, 63: 47, 64: 53, 65: 53, 66: 115, 67: 115, 68: 71, 69: 0
+}
 
 class InstrumentControllerComponent(CompoundComponent):
 
@@ -47,6 +62,12 @@ class InstrumentControllerComponent(CompoundComponent):
 		self._octave_up_button = None
 		self._octave_down_button = None
 		self._scales_toggle_button = None
+		self._track_pad_color_int = None  # Initialize track color cache
+		self._using_track_color_for_feedback = False  # Flag to track if we're using track color
+
+		# Initialize color table using the CLIP_COLOR_TABLE directly
+		self._clip_color_table = CLIP_COLOR_TABLE
+
 		self.set_scales_toggle_button(side_buttons[0])#Enable scale selecting mode
 		self.set_octave_up_button(side_buttons[2])#Shift octave up
 		self.set_octave_down_button(side_buttons[3])#Shift octave down
@@ -81,6 +102,56 @@ class InstrumentControllerComponent(CompoundComponent):
 		self._note_repeat_selector = False
 		self._note_repeat.set_enabled(False)
 	
+	# --- Helper functions for color conversion (adapted from ClipLooperComponent) ---
+	def color_distance(self, color1, color2):
+		"""
+		Calculate the distance between two RGB colors.
+		"""
+		# Handle both tuple and integer color representations
+		r1, g1, b1 = color1 if isinstance(color1, tuple) else (color1 >> 16, (color1 >> 8) & 255, color1 & 255)
+		r2, g2, b2 = color2 if isinstance(color2, tuple) else (color2 >> 16, (color2 >> 8) & 255, color2 & 255)
+		return ((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2) ** 0.5
+
+	def find_closest_color(self, track_color_rgb_int):
+		"""
+		Find the closest matching Launchpad color value using the ABLETON_TO_LAUNCHPAD_COLORS mapping.
+		Input is the Ableton track color integer.
+		Returns a Launchpad color value (integer 0-127).
+		"""
+		if track_color_rgb_int is None:
+			return None
+
+		# Try direct mapping first - this should work for standard Ableton colors
+		if track_color_rgb_int in ABLETON_TO_LAUNCHPAD_COLORS:
+			return ABLETON_TO_LAUNCHPAD_COLORS[track_color_rgb_int]
+
+		# Extract RGB values if input is an integer
+		if isinstance(track_color_rgb_int, int):
+			r = (track_color_rgb_int >> 16) & 255
+			g = (track_color_rgb_int >> 8) & 255
+			b = track_color_rgb_int & 255
+			track_rgb_tuple = (r, g, b)
+		else:
+			track_rgb_tuple = track_color_rgb_int
+
+		# Check if we already have a mapping for this RGB tuple
+		if isinstance(track_rgb_tuple, tuple) and track_rgb_tuple in ABLETON_TO_LAUNCHPAD_COLORS:
+			return ABLETON_TO_LAUNCHPAD_COLORS[track_rgb_tuple]
+
+		# Find the closest matching color in the CLIP_COLOR_TABLE
+		closest_color_value = None
+		min_dist = float('inf')
+		
+		for color_tuple, lp_value in self._clip_color_table.items():
+			dist = self.color_distance(color_tuple, track_rgb_tuple)
+			if dist < min_dist:
+				min_dist = dist
+				closest_color_value = lp_value
+		
+		return closest_color_value
+
+	# --- End of helper functions ---
+
 	def _remove_scale_listeners(self):
 		try:
 			self.song().remove_root_note_listener(self.handle_root_note_changed)
@@ -118,7 +189,12 @@ class InstrumentControllerComponent(CompoundComponent):
 			self._track_controller.set_enabled(enabled)
 		feedback_channels = [self.base_channel, self.base_channel + 1, self.base_channel + 2, self.base_channel + 3]
 		# non_feedback_channel = self.base_channel + 4
+		
+		# Update track color and then set feedback velocity
+		if enabled:
+			self._update_track_color()
 		self._set_feedback_velocity()
+		
 		self._control_surface.set_feedback_channels(feedback_channels)
 		if not enabled:
 			self._control_surface.release_controlled_track()
@@ -138,9 +214,22 @@ class InstrumentControllerComponent(CompoundComponent):
 					
 	def _set_feedback_velocity(self):
 		if self.song().session_record:
+			# For recording, always use the red feedback color
 			self._control_surface._c_instance.set_feedback_velocity(self._recordind_feedback_velocity)
-		else:
+			self._using_track_color_for_feedback = False
+		elif self._scales.is_drumrack and self._drum_group_device != None:
+			# For drum mode, use the standard feedback color
 			self._control_surface._c_instance.set_feedback_velocity(self._normal_feedback_velocity)
+			self._using_track_color_for_feedback = False
+		else:
+			# For note mode, use track color if available
+			if self._track_pad_color_int is not None:
+				self._control_surface._c_instance.set_feedback_velocity(self._track_pad_color_int)
+				self._using_track_color_for_feedback = True
+			else:
+				# Fallback to standard feedback color if no track color
+				self._control_surface._c_instance.set_feedback_velocity(self._normal_feedback_velocity)
+				self._using_track_color_for_feedback = False
 
 	@subject_slot('session_record')
 	def _on_session_record_changed(self):
@@ -200,12 +289,15 @@ class InstrumentControllerComponent(CompoundComponent):
 
 	#Enables scale selection mode
 	def _scales_toggle(self, value, sender):
+		self._control_surface.log_message(f"InstrumentController DEBUG: ENTER _scales_toggle: value={value}")
 		if self.is_enabled():
 			if (value != 0):
+				self._control_surface.log_message(f"InstrumentController DEBUG: _scales_toggle PRESSED (value={value})")
 				self._get_drumrack_device()
 				if(self._scales.is_drumrack and self._drum_group_device != None):
 					self._toggle_note_repeat_selector()
 					self._scales_toggle_button.turn_on()
+					self._scales.update()
 				else:
 					self._scales.set_enabled(True)
 					self._osd_mode_backup = self._osd.mode
@@ -213,6 +305,7 @@ class InstrumentControllerComponent(CompoundComponent):
 					self._scales_toggle_button.turn_on()
 					self._scales.update()
 			else:
+				self._control_surface.log_message(f"InstrumentController DEBUG: _scales_toggle RELEASED (value={value})")
 				self._scales_toggle_button.turn_off()
 				self._scales.set_enabled(False)
 				self._osd.mode = self._osd_mode_backup
@@ -395,11 +488,25 @@ class InstrumentControllerComponent(CompoundComponent):
 		else:
 			self._control_surface.show_message("quick scale : REPEATER")
 
+	def _update_track_color(self):
+		"""Update the track color cache for the currently selected track"""
+		self._track_pad_color_int = None
+		selected_track = self._track_controller.selected_track
+		if liveobj_valid(selected_track):
+			# Get the track color via the find_closest_color method
+			track_color_rgb = selected_track.color
+			self._track_pad_color_int = self.find_closest_color(track_color_rgb)
+		
+		return self._track_pad_color_int
+
 	def update(self):
 		if self.is_enabled():
 			if self._track_controller != None:
 				self._track_controller.set_enabled(True)
 
+			# Update track color cache
+			self._update_track_color()
+			
 			self._update_matrix()
 
 			for button in self._remaining_buttons:
@@ -424,7 +531,7 @@ class InstrumentControllerComponent(CompoundComponent):
 					self._octave_down_button.turn_off()
 
 			self._update_OSD()
-			#self._control_surface.log_message("Swing Amount: " + str(self._swing_amount()))			  
+			#self._control_surface.log_message("Swing Amount: " + str(self._swing_amount()))
 
 	def set_osd(self, osd):
 		self._osd = osd
@@ -476,13 +583,19 @@ class InstrumentControllerComponent(CompoundComponent):
 	#Listener, setup drumrack scale mode and load the selected scale for Track/Cip (Disabled)
 	def on_selected_track_changed(self):
 		if self._track_controller._implicit_arm:
+			# Update track color first thing when track changes
+			self._track_pad_color_int = None  # Clear the cache
+			self._update_track_color()  # Update with new track's color
+			
 			self._get_drumrack_device()
 			if self._drum_group_device != None:
 				self._scales.set_drumrack(True)
 			else:
 				self._scales.set_drumrack(False)
 				
-			self._note_repeat.set_enabled(False)		
+			self._note_repeat.set_enabled(False)
+			# Update feedback velocity to match the new track color
+			self._set_feedback_velocity()
 			self.update()
 	
 	def on_selected_scene_changed(self):
@@ -562,10 +675,15 @@ class InstrumentControllerComponent(CompoundComponent):
 						if note < 128 and note >= 0:
 							if self._drum_group_device == None or (self._drum_group_device != None and self._drum_group_device.can_have_drum_pads and self._drum_group_device.has_drum_pads and self._drum_group_device.drum_pads[note].chains):
 								light = self._getLightForNote(note)
-								button.set_light(light)
 								button.set_enabled(False)
 								button.set_channel(self.base_channel)
 								button.set_identifier(note)
+								
+								# Check if light is an integer (track color) or string (skin value)
+								if isinstance(light, int):
+									button.send_value(light)
+								else:
+									button.set_light(light)
 							else:
 								button.set_light("DrumGroup.PadEmpty")
 								button.set_enabled(False)
@@ -629,8 +747,25 @@ class InstrumentControllerComponent(CompoundComponent):
 						
 						
 			else:
+				# --- Get Track Color ---
+				track_pad_color_int = self._track_pad_color_int  # Use cached value
+				if track_pad_color_int is None:
+					track_pad_color_int = self._update_track_color()  # Update if not cached
+
+
+				# Define skin fallbacks
+				root_skin_key = 'Note.Pads.Root'
+				drum_filled_skin_key = 'DrumGroup.PadFilled'
+				in_scale_color = "Note.Pads.InScale" # Keep using skin color for non-root notes for contrast
+				highlight_color = "Note.Pads.Highlight"
+				out_of_scale_color = "Note.Pads.OutOfScale"
+				invalid_color = "Note.Pads.Invalid"
+				empty_pad_color = "DrumGroup.PadEmpty" # Added for drum rack consistency
+				# --- End Track Color ---
+
+
 				if self._scales.is_quick_scale:
-					
+
 					selected_modus = self._scales._modus
 					selected_key = self._scales._key
 
@@ -776,31 +911,48 @@ class InstrumentControllerComponent(CompoundComponent):
 					if button and (not self._scales.is_quick_scale or j > 1):
 						a = a +1
 						note_info = pattern.note(i, max_j - j)
+						button.set_enabled(False) # Assume it's a note button unless proven otherwise
+						button.set_channel(non_feedback_channel) # Default channel
+
 						if note_info.index != None:
-							if note_info.root:
-								button.set_light("Note.Pads.Root")
-							elif note_info.highlight:
-								button.set_light("Note.Pads.Highlight")
-							elif note_info.in_scale:
-								button.set_light("Note.Pads.InScale")
-							elif note_info.valid:
-								button.set_light("Note.Pads.OutOfScale")
-							else:
-								button.set_light("Note.Pads.Invalid")
-							button.set_enabled(False)
 							button.set_channel(note_channel[note_info.index])
-							# comment the line above and use the one below if you want instrument controller to use one channel instead of 3
-							# button.set_channel(note_channel[0])
 							button.set_identifier(note_info.index)
 							if(note_channel[note_info.index]<15):
 								note_channel[note_info.index] = note_channel[note_info.index] + 1
+
+							if note_info.root:
+								# Use track color for root notes if available
+								if track_pad_color_int is not None:
+									button.send_value(track_pad_color_int)
+								else:
+									button.set_light(root_skin_key)
+							elif note_info.highlight:
+								button.set_light(highlight_color)
+							elif note_info.in_scale:
+								# Use a lighter version of track color for in-scale notes if available
+								if track_pad_color_int is not None:
+									# Get a brighter variant of the track color
+									# This is a simplified approach - you might want to define specific 
+									# highlight colors for each track color in your color tables
+									button.set_light(in_scale_color) # Use skin for now
+								else:
+									button.set_light(in_scale_color)
+							elif note_info.valid: # valid but out_of_scale
+								button.set_light(out_of_scale_color)
+							else: # Not valid (should be covered by else below, but safety)
+								button.set_light(invalid_color)
+								button.set_enabled(True) # Non-note button
+								button.set_channel(non_feedback_channel)
+								button.set_identifier(a)
 						else:
+							# This button does not correspond to a valid note index
 							button.set_channel(non_feedback_channel)
 							button.set_identifier(a)
-							button.set_light("Note.Pads.Invalid")
-							button.set_enabled(True)
-						button.force_next_send()
-						
+							button.set_light(invalid_color)
+							button.set_enabled(True) # Treat as disabled/non-note button
+
+						#button.force_next_send() # force_next_send might interfere with send_value color
+
 			for button in self._side_buttons:
 				button.use_default_message()
 				button.set_channel(non_feedback_channel)
@@ -808,7 +960,14 @@ class InstrumentControllerComponent(CompoundComponent):
 				button.force_next_send()
 
 	def _getLightForNote(self, note):
-		return "DrumGroup.PadFilled"
+		# Get track color if available
+		track_pad_color_int = self._track_pad_color_int
+		
+		# If we have a valid track color, use it directly
+		if track_pad_color_int is not None:
+			return track_pad_color_int
+		
+		# Fall back to skin colors if no track color is available
 		if (note<4):
 			return "DrumGroup.PadFilled1"
 		elif (note<20):
@@ -822,11 +981,11 @@ class InstrumentControllerComponent(CompoundComponent):
 		elif (note<84):
 			return "DrumGroup.PadFilled1"
 		elif (note<100):
-			return "DrumGroup.PadFilled2"		
+			return "DrumGroup.PadFilled2"        
 		elif (note<116):
-			return "DrumGroup.PadFilled3"		  
+			return "DrumGroup.PadFilled3"            
 		else: 
-			return "DrumGroup.PadFilled4"	
+			return "DrumGroup.PadFilled4"
 
 	def tuple_idx(self, target_tuple, obj):
 		for i in xrange(0, len(target_tuple)):
