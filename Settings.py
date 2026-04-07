@@ -35,6 +35,8 @@ class Settings():
     DEVICE_CONTROLLER__STEPLESS_MODE = True
     # When recalling a saved device lock, focus Ableton on that device
     DEVICE_CONTROLLER__FOCUS_LOCKED_DEVICE_ON_SELECT = True
+    # Restore saved device lock slots from device names containing LP95_LOCK1..LP95_LOCK4
+    DEVICE_CONTROLLER__AUTO_RESTORE_LOCKS = True
     # device control stepless fader velocity thresholds
     # if velocity is above threshold, the parameter will be changed instantly
     VELOCITY_THRESHOLD_MAX = 100

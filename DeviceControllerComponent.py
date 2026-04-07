@@ -38,6 +38,8 @@ class DeviceControllerComponent(DeviceComponent):
         self._precision_mode = False
         self._stepless_mode = Settings.DEVICE_CONTROLLER__STEPLESS_MODE
         self._focus_locked_device_on_select = Settings.DEVICE_CONTROLLER__FOCUS_LOCKED_DEVICE_ON_SELECT
+        self._auto_restore_locks = Settings.DEVICE_CONTROLLER__AUTO_RESTORE_LOCKS
+        self._lock_restore_tag_prefix = 'LP95_LOCK'
 
         # Lock logic
         self._lock_button_slots = [None, None, None, None]
@@ -99,6 +101,7 @@ class DeviceControllerComponent(DeviceComponent):
         # selected device listener
         self.song().add_appointed_device_listener(self._on_device_changed)
         self._control_surface.set_device_component(self)
+        self._restore_locked_devices_from_tags()
 
     def disconnect(self):
         self._control_surface.application().view.remove_is_view_visible_listener(
@@ -257,6 +260,52 @@ class DeviceControllerComponent(DeviceComponent):
             self.song().view.select_device(device)
         if not (hasattr(self._control_surface, '_selector') and self._control_surface._selector and hasattr(self._control_surface._selector, '_transport_mode') and self._control_surface._selector._transport_mode):
             self.set_device_view()
+
+    def _lock_restore_tag(self, index):
+        return self._lock_restore_tag_prefix + str(index + 1)
+
+    def _iter_devices_for_lock_restore(self, track_or_chain):
+        if track_or_chain is None or not hasattr(track_or_chain, 'devices'):
+            return
+        for device in tuple(track_or_chain.devices):
+            yield device
+            if getattr(device, 'can_have_chains', False):
+                for chain in tuple(device.chains):
+                    for nested_device in self._iter_devices_for_lock_restore(chain):
+                        yield nested_device
+
+    def _find_locked_devices_from_tags(self):
+        restored_devices = [None, None, None, None]
+        duplicate_slots = set()
+        track_containers = list(tuple(self.song().tracks) + tuple(self.song().return_tracks))
+        master_track = getattr(self.song(), 'master_track', None)
+        if master_track is not None:
+            track_containers.append(master_track)
+
+        for track_or_chain in track_containers:
+            for device in self._iter_devices_for_lock_restore(track_or_chain):
+                device_name = str(getattr(device, 'name', '')).upper()
+                for index in range(len(restored_devices)):
+                    if self._lock_restore_tag(index) in device_name:
+                        if restored_devices[index] is None:
+                            restored_devices[index] = device
+                        elif restored_devices[index] != device:
+                            duplicate_slots.add(index + 1)
+        return restored_devices, sorted(duplicate_slots)
+
+    def _restore_locked_devices_from_tags(self):
+        if not self._auto_restore_locks:
+            return
+
+        restored_devices, duplicate_slots = self._find_locked_devices_from_tags()
+        if restored_devices != self._locked_devices:
+            self._locked_devices = restored_devices
+            self._locked_device_index = None
+
+        if duplicate_slots:
+            self._control_surface.show_message(
+                "*** WARNING *** MULTIPLE DEVICES TAGGED FOR LOCK SLOT(S): " +
+                ', '.join([str(slot) for slot in duplicate_slots]))
 
     def on_selected_track_changed(self):
         if not self._is_locked_to_device:
