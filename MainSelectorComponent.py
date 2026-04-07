@@ -117,10 +117,13 @@ class MainSelectorComponent(ModeSelectorComponent):
 		self._transport_mode = False
 
 		self._clip_looper = ClipLooperComponent(self._session)
-		self._clip_looper.set_matrix(matrix)
-		self._clip_looper.set_side_buttons(tuple(side_buttons))
-		self._clip_looper.set_nav_buttons(tuple(top_buttons[:4]))  
+		self._clip_looper.set_enabled(False)  # Start disabled
+		self._clip_looper._control_surface = control_surface # Pass control surface for logging
 
+		# Initialize transport mode if it's the default mode
+		if self._main_mode_index == 3 and self._sub_mode_list[3] == 1:
+			self._setup_transport_mode(True)
+		
 		self._init_session()
 		self._all_buttons = tuple(self._all_buttons)
 
@@ -189,11 +192,16 @@ class MainSelectorComponent(ModeSelectorComponent):
 					self._pro_session_on = not self._pro_session_on
 				elif new_mode in [1, 2, 3]:  # User modes and Mixer mode
 					self._sub_mode_list[new_mode] = (self._sub_mode_list[new_mode] + 1) % len(self._get_mode_options(new_mode))
+					if new_mode == 3:  # Mixer mode
+						self._setup_transport_mode(self._sub_mode_list[3] == 1)  # Re-initialize if switching to transport mode
 			else:
 				# Switching to a different mode
 				self._main_mode_index = new_mode
 				self._clear_transport_controls()
-				if new_mode != 3:  # If not switching to Mixer mode
+				self._clear_clip_looper_controls()
+				if new_mode == 3:  # Switching to Mixer mode
+					self._setup_transport_mode(self._sub_mode_list[3] == 1)  # Initialize transport mode if needed
+				else:
 					self._transport_mode = False
 
 			self._mixer_or_transport_mode = (new_mode == 3)
@@ -626,87 +634,122 @@ class MainSelectorComponent(ModeSelectorComponent):
 		self._sub_modes.set_enabled(as_active)
 		
 	def _setup_transport_mode(self, as_active):
+		# NOTE: This function now sets up BOTH transport controls and clip looper controls
+		# when activated, and clears them when deactivated.
 		print(f"Setting up transport mode: {as_active}")
-		self._transport_controller.set_enabled(as_active)
-		self._clip_looper.set_enabled(as_active)
+		self._transport_mode = as_active # Keep track of the mode state
+
+		# Always ensure components are disabled before setup/teardown to prevent conflicts
+		self._transport_controller.set_enabled(False)
+		self._clip_looper.set_enabled(False)
+		self._clip_looper.set_ignore_top_row(False) # Reset flag when disabling looper
+		self._sub_modes.set_enabled(False) # Ensure mixer submodes are off
+
 		if as_active:
-			self._sub_modes.release_controls()  # Clear mixer controls
-			self._setup_transport_controls()
-			self._setup_clip_looper_controls()
-			self._update_transport_buttons()
-			self._transport_controller.update()
-			self._clip_looper.update()
+			self._clear_matrix() # Clear the whole matrix for transport/looper
+			# Setup actual controls
+			self._setup_transport_controls() # Assigns buttons to _transport_controller
+			self._setup_clip_looper_controls() # Assigns buttons to _clip_looper
+
+			# Set the flag for ClipLooperComponent AFTER setup
+			self._clip_looper.set_ignore_top_row(True)
+
+			# Enable components *after* setup is complete
+			self.application().view.show_view('Detail/Clip') # Show clip detail view
+			self._transport_controller.set_enabled(True)
+			self._clip_looper.set_enabled(True)
+
+			# Update displays
+			self._transport_controller.update() # Transport needs update first
+			self._clip_looper.update() # Clip looper updates remaining rows
+			self.log_message("Transport/Looper mode activated")
 		else:
+			# Explicitly clear controls when disabling
 			self._clear_transport_controls()
+			self._clear_clip_looper_controls()
+			self.log_message("Transport/Looper mode deactivated")
 
 	def _setup_transport_controls(self):
-		# Clear only the top row of matrix buttons
-		for track_index in range(8):
-			button = self._matrix.get_button(track_index, 0)
-			button.set_on_off_values("DefaultButton.Disabled", "DefaultButton.Disabled")
-			button.turn_off()
-
+		# Assign transport buttons using the TOP ROW OF THE MATRIX
 		play_button = self._matrix.get_button(0, 0)
 		stop_button = self._matrix.get_button(1, 0)
 		record_button = self._matrix.get_button(2, 0)
 		loop_button = self._matrix.get_button(3, 0)
 		metronome_button = self._matrix.get_button(4, 0)
+		tempo_down_button = self._matrix.get_button(5, 0)
+		tempo_up_button = self._matrix.get_button(6, 0)
+		# button_7 = self._matrix.get_button(7, 0) # Available
 
+		# Set LED behaviors
 		play_button.set_on_off_values("Transport.PlayOn", "Transport.PlayOff")
 		stop_button.set_on_off_values("Transport.StopOn", "Transport.StopOff")
 		record_button.set_on_off_values("Transport.RecordOn", "Transport.RecordOff")
 		loop_button.set_on_off_values("Transport.LoopOn", "Transport.LoopOff")
 		metronome_button.set_on_off_values("Transport.MetronomeOn", "Transport.MetronomeOff")
+		tempo_down_button.set_light("Transport.TempoDown") # Placeholder LED
+		tempo_up_button.set_light("Transport.TempoUp")   # Placeholder LED
+		# button_7.set_light("DefaultButton.Off") # Example if using button 7
 
+		# Assign buttons to the component
 		self._transport_controller.set_play_button(play_button)
 		self._transport_controller.set_stop_button(stop_button)
 		self._transport_controller.set_record_button(record_button)
 		self._transport_controller.set_loop_button(loop_button)
 		self._transport_controller.set_metronome_button(metronome_button)
+		self._transport_controller.set_tempo_buttons(tempo_up_button, tempo_down_button) # Up, Down
+		# self._transport_controller.set_tap_tempo_button(button_7) # Example
+
+		# Ensure initial button states are updated
+		self._transport_controller.update()
 
 	def _setup_clip_looper_controls(self):
+		# Explicitly clear any previous controls
+		self._clip_looper.set_matrix(None)
+		self._clip_looper.set_side_buttons(None)
+		self._clip_looper.set_nav_buttons(None)
+		
 		# Use rows 1-7 for clip looper (leaving row 0 for transport controls)
 		clip_matrix = ButtonMatrixElement(rows=[
 			[self._matrix.get_button(x, y) for x in range(8)]
 			for y in range(1, 8)  # This creates a 7x8 matrix
 		])
-		self._clip_looper.set_matrix(clip_matrix)
-		# Start the timer
-		self._clip_looper._update_timer.start()
-
-		# Update the clip looper display
+		
+		# Assign controls
+		self._clip_looper.set_matrix(self._matrix)
+		self._clip_looper.set_side_buttons(tuple(self._side_buttons))
+		self._clip_looper.set_nav_buttons(tuple(self._nav_buttons[:4]))
+		
+		# Force an update of clip slots
+		self._clip_looper.update_clip_slots()
 		self._clip_looper.update()
 
-	def _update_transport_buttons(self):
-		# Clear only the top row of matrix buttons
-		for track_index in range(8):
-			button = self._matrix.get_button(track_index, 0)
-			button.set_on_off_values("DefaultButton.Disabled", "DefaultButton.Disabled")
-			button.turn_off()
-
-		play_button = self._matrix.get_button(0, 0)
-		stop_button = self._matrix.get_button(1, 0)
-		record_button = self._matrix.get_button(2, 0)
-		loop_button = self._matrix.get_button(3, 0)
-		metronome_button = self._matrix.get_button(4, 0)
-
-		play_button.set_on_off_values("Transport.PlayOn", "Transport.PlayOff")
-		stop_button.set_on_off_values("Transport.StopOn", "Transport.StopOff")
-		record_button.set_on_off_values("Transport.RecordOn", "Transport.RecordOff")
-		loop_button.set_on_off_values("Transport.LoopOn", "Transport.LoopOff")
-		metronome_button.set_on_off_values("Transport.MetronomeOn", "Transport.MetronomeOff")
-
-		self._transport_controller.update()
-		self._clip_looper.update()  # Make sure to update the clip looper as well
-
 	def _clear_transport_controls(self):
+		# Clear transport-specific button assignments
 		self._transport_controller.set_play_button(None)
 		self._transport_controller.set_stop_button(None)
 		self._transport_controller.set_record_button(None)
 		self._transport_controller.set_loop_button(None)
 		self._transport_controller.set_metronome_button(None)
-		self._clip_looper.set_enabled(False)
+		self._transport_controller.set_tempo_buttons(None, None) # Clear tempo buttons
+		self._transport_controller.set_tap_tempo_button(None)
+		self._transport_controller.set_nudge_buttons(None, None)
+		self._transport_controller.set_quant_toggle_button(None)
+		self._transport_controller.set_undo_button(None)
+
+		# Reset the matrix buttons previously used by transport mode (row 0)
+		for i in range(8):
+			button = self._matrix.get_button(i, 0)
+			if button is not None:
+				button.reset()
+				button.set_light("DefaultButton.Off")
+				button.set_on_off_values("DefaultButton.On", "DefaultButton.Off") # Reset LED behavior
+
+	def _clear_clip_looper_controls(self):
 		self._clip_looper.set_matrix(None)
+		self._clip_looper.set_side_buttons(None)
+		self._clip_looper.set_nav_buttons(None)
+		if hasattr(self._clip_looper, '_update_timer'):
+			self._clip_looper._update_timer.stop()
 
 	def _init_session(self):
 		#self._session.set_stop_clip_value("Session.StopClip")
@@ -767,7 +810,6 @@ class MainSelectorComponent(ModeSelectorComponent):
 	def _on_session_offset_changed(self):
 		if hasattr(self, '_clip_looper'):
 			self._clip_looper.update_clip_slots()
-
 	#def _update_session_tempo_button(self):
 	#	if self._session != None:
 	#		self._session._update_session_tempo_button()

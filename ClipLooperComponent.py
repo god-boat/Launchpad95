@@ -8,6 +8,9 @@ from .ColorsMK2 import CLIP_COLOR_TABLE, RGB_COLOR_TABLE
 import Live
 import time
 
+TRANSPOSE_REPEAT_DELAY = 500  # ms
+TRANSPOSE_REPEAT_INTERVAL = 50 # ms, faster repeat for transpose
+
 ABLETON_TO_LAUNCHPAD_COLORS = {
     0: 72,  # Fight the Sunrise (Light Pink)
     1: 96,  # Hawaiian Passion (Light Orange)
@@ -82,6 +85,7 @@ ABLETON_TO_LAUNCHPAD_COLORS = {
 }
 
 QUANTIZATION_STEPS = [1, 0.5, 0.25, 0.125]  # 1 bar, 1/2, 1/4, 1/8
+MIN_LOOP_LENGTH_BEATS = 0.125 # Minimum allowed loop length
 
 class ClipLooperComponent(CompoundComponent, SlotManager):
     def __init__(self, session_component, *a, **k):
@@ -102,7 +106,13 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         self._playhead_position = []
         self._loop_start = []
         self._loop_end = []
+        self._temp_loop_start = None # Added for _set_loop_points logic
+        self._transpose_up_timers = [None] * 3 # Added for transposition repeat
+        self._transpose_down_timers = [None] * 3 # Added for transposition repeat
         self._is_enabled = False
+        self._monitored_tracks = []
+        self._ignore_top_row = False # Flag to ignore row 0 when in transport overlay mode
+        self._control_surface = None # Added for logging
 
         self._on_selected_track_changed.subject = self.song().view
         self._on_selected_scene_changed.subject = self.song().view
@@ -142,15 +152,61 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
     def disconnect_nav_button(self, button):
         button.remove_value_listener(self._on_nav_button_value)
 
+    def set_ignore_top_row(self, ignore):
+        self.log_message(f"Setting ignore_top_row to: {ignore}")
+        self._ignore_top_row = ignore
+        self.update() # Trigger an update to redraw correctly
+
     @subject_slot('value')
     def _on_matrix_value(self, value, x, y, is_momentary):
-        if self._matrix and value is not None:  # Handle both button press and release
-            clip_index = y // 2
-            if clip_index < len(self._clip_slots):
+        if self._ignore_top_row:
+            # --- Transport Mode ---
+            if y == 0: # Row 0 is transport, ignore here
+                return
+
+            if y == 1: # Physical Row 1 is transpose
+                clip_index = -1
+                action = None # 'down' or 'up'
+
+                if x == 0: clip_index, action = 0, 'down'
+                elif x == 1: clip_index, action = 0, 'up'
+                elif x == 2: clip_index, action = 1, 'down'
+                elif x == 3: clip_index, action = 1, 'up'
+                elif x == 4: clip_index, action = 2, 'down'
+                elif x == 5: clip_index, action = 2, 'up'
+
+                if clip_index != -1 and action:
+                    if action == 'down':
+                        if value: self._on_transpose_down_pressed(clip_index)
+                        else: self._on_transpose_down_released(clip_index)
+                    elif action == 'up':
+                        if value: self._on_transpose_up_pressed(clip_index)
+                        else: self._on_transpose_up_released(clip_index)
+                return # Handled transpose, exit
+
+            # --- Clip Rows (Physical Rows 2-7) ---
+            effective_y = y - 2 # Offset by transport (0) and transpose (1) rows
+            if effective_y < 0: # Should only happen for y=0, 1 handled above
+                 self.log_message(f"Ignoring press on unexpected row {y} in transport mode.")
+                 return
+
+        else:
+            # --- Normal Mode (Physical Rows 0-5) ---
+            if y < 0 or y >= 6: # Clip controls are on rows 0-5
+                self.log_message(f"Ignoring press on row {y} outside active clip area in normal mode.")
+                return
+            effective_y = y # No offset
+
+        # --- Common Logic for Clip Interaction ---
+        if effective_y >= 0: # Ensure we are in a valid clip row range
+            clip_index = effective_y // 2
+            row_type = effective_y % 2 # 0 for Playhead/Loop, 1 for Controls
+
+            if 0 <= clip_index < len(self._clip_slots):
                 clip_slot = self._clip_slots[clip_index]
                 if clip_slot is not None and clip_slot.has_clip:
                     clip = clip_slot.clip
-                    if y % 2 == 0:  # Playhead row
+                    if row_type == 0:  # Playhead/Loop row
                         if value == 127:  # Only set position on button press
                             self._set_clip_position(clip, x)
                     else:  # Control row
@@ -159,20 +215,63 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
                         elif value == 127:  # Only handle press for other control buttons
                             self._handle_control_press(clip, x)
                 else:
-                    self.log_message(f"No valid clip at index {clip_index}")
+                    self.log_message(f"No valid clip at index {clip_index} for row_type {row_type} (effective_y={effective_y}, y={y})")
             else:
-                self.log_message(f"Clip index {clip_index} out of range")
+                self.log_message(f"Clip index {clip_index} out of range (effective_y={effective_y}, y={y})")
 
-        self._update_display()
+        self._update_display() # Update display after handling regular clip interactions
 
     def _on_side_button_value(self, value, sender):
         if not self._is_enabled:
             print("ClipLooper: Component is not enabled, ignoring side button value")
             return
+
         if value and self._side_buttons:  # Only handle button presses
             try:
                 index = list(self._side_buttons).index(sender)
-                self._handle_side_button_press(index)
+                # Map side button index (2, 4, 6) to clip index (0, 1, 2) for FOCUS
+                # Map side button index (3, 5, 7) to clip index (0, 1, 2) for PLAY/STOP TOGGLE
+                focus_clip_index = -1
+                toggle_clip_index = -1
+
+                if index == 2: focus_clip_index = 0
+                elif index == 4: focus_clip_index = 1
+                elif index == 6: focus_clip_index = 2
+                elif index == 3: toggle_clip_index = 0
+                elif index == 5: toggle_clip_index = 1
+                elif index == 7: toggle_clip_index = 2
+                
+                # Handle FOCUS action
+                if 0 <= focus_clip_index < len(self._clip_slots):
+                    clip_slot = self._clip_slots[focus_clip_index]
+                    if clip_slot and clip_slot.has_clip:
+                        self._selected_clip_index = focus_clip_index 
+                        self.log_message(f"Side button {index} selected clip {focus_clip_index}")
+                        self._focus_on_clip(clip_slot.clip)
+                        # Only update display after focusing
+                        self._update_display()
+                    else:
+                        self.log_message(f"No clip in slot {focus_clip_index} for side button {index}")
+                # Handle MUTE TOGGLE action
+                elif 0 <= toggle_clip_index < len(self._clip_slots):
+                    clip_slot = self._clip_slots[toggle_clip_index]
+                    # Get the track object
+                    track = None
+                    if clip_slot and liveobj_valid(clip_slot):
+                        track = clip_slot.canonical_parent # Track is the parent of clip_slot
+
+                    if track and liveobj_valid(track):
+                        # Toggle mute state
+                        new_mute_state = not track.mute
+                        self.log_message(f"Side button {index} toggling track mute for clip {toggle_clip_index}. Current: {track.mute}, Setting to: {new_mute_state}")
+                        track.mute = new_mute_state
+                        self._update_display()  # Update display after mute toggle
+                    else:
+                         self.log_message(f"No valid track found for clip_slot at index {toggle_clip_index} for side button {index}")
+                else:
+                    # Ignore presses on side buttons 0, 1
+                    self.log_message(f"Ignoring press on unused side button index: {index}")
+                    
             except ValueError:
                 self.log_message(f"Sender {sender} not found in side buttons")
 
@@ -180,6 +279,19 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         if value and self._nav_buttons:  # Only handle button presses
             index = list(self._nav_buttons).index(sender)
             self._handle_nav_button_press(index)
+
+    def _clip_uses_absolute_loop_points(self, clip):
+        return liveobj_valid(clip) and clip.is_audio_clip and clip.warping
+
+    def _get_loop_position_bounds(self, clip):
+        if self._clip_uses_absolute_loop_points(clip):
+            return clip.start_marker, clip.end_marker
+        return 0.0, max(0.0, clip.end_marker - clip.start_marker)
+
+    def _get_quantized_playback_position(self, clip, quantize_beat):
+        if self._clip_uses_absolute_loop_points(clip):
+            return quantize_beat(clip.playing_position)
+        return quantize_beat(clip.playing_position - clip.start_marker)
 
     def _set_clip_position(self, clip, x):
         if not liveobj_valid(clip):
@@ -206,6 +318,8 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         original_start = clip.start_marker
         original_end = clip.end_marker
         original_length = original_end - original_start
+        loop_min, loop_max = self._get_loop_position_bounds(clip)
+        loop_range = loop_max - loop_min
         current_loop_length = clip.loop_end - clip.loop_start
 
         print(f"Before any changes: start_marker={original_start}, end_marker={original_end}, length={original_length}")
@@ -213,10 +327,13 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         print(f"Button pressed: x={x}")
         print(f"Current quantization: {quantization_value}")
 
-        # Calculate the new loop start and end
-        new_loop_start = (x / 7.0) * original_length
+        # Calculate the new loop start and end - use 8 divisions for intuitive positioning
+        # This makes button 0 = start, button 4 = middle, button 7 = 7/8 through the clip
+        new_loop_start = loop_min + (x / 8.0) * loop_range
         new_loop_start_quantized = quantize_beat(new_loop_start)
-        new_loop_end = min(new_loop_start_quantized + current_loop_length, original_length)
+        max_loop_start = max(loop_min, loop_max - current_loop_length)
+        new_loop_start_quantized = max(loop_min, min(new_loop_start_quantized, max_loop_start))
+        new_loop_end = min(new_loop_start_quantized + current_loop_length, loop_max)
 
         print(f"Calculated new loop: start={new_loop_start}, quantized_start={new_loop_start_quantized}, end={new_loop_end}")
 
@@ -252,7 +369,16 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
             self._double_loop_length(clip)
         elif x == 3:  # Halve loop length
             self._halve_loop_length(clip)
-        self._focus_on_clip(clip)  # Focus on the clip after any manipulation
+        elif x == 5: # Decrease loop length by quantization
+            self._adjust_loop_length_by_quantization(clip, -1)
+        elif x == 6: # Increase loop length by quantization
+            self._adjust_loop_length_by_quantization(clip, 1)
+        elif x == 7: # Toggle loop on/off
+            self._toggle_loop(clip)
+
+        # Only focus if we didn't already focus in the adjustment method
+        if x not in [5, 6]:
+            self._focus_on_clip(clip) # Focus on the clip after manipulation
 
     def _halve_loop_length(self, clip):
         if not liveobj_valid(clip):
@@ -310,16 +436,16 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
 
         loop_length = clip.loop_end - clip.loop_start
         new_loop_end = clip.loop_start + 2 * loop_length
-        clip_length = clip.end_marker - clip.start_marker
+        _, loop_max = self._get_loop_position_bounds(clip)
 
-        print(f"Attempting to double loop: loop_start={clip.loop_start}, loop_end={clip.loop_end}, new_loop_end={new_loop_end}, clip_length={clip_length}")
+        print(f"Attempting to double loop: loop_start={clip.loop_start}, loop_end={clip.loop_end}, new_loop_end={new_loop_end}, loop_max={loop_max}")
 
-        if new_loop_end <= clip_length:
+        if new_loop_end <= loop_max:
             old_start, old_end = clip.loop_start, clip.loop_end
             clip.loop_end = new_loop_end
             print(f"Doubled loop: old_start={old_start}, old_end={old_end}, new_start={clip.loop_start}, new_end={clip.loop_end}")
         else:
-            print(f"Couldn't double loop: new loop end ({new_loop_end}) would exceed clip length ({clip_length})")
+            print(f"Couldn't double loop: new loop end ({new_loop_end}) would exceed clip boundary ({loop_max})")
 
         print("After double loop attempt:")
         self._print_clip_info(clip)
@@ -353,24 +479,18 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
 
         loop_length = clip.loop_end - clip.loop_start
         jump_amount = direction * quantize_beat(1)
+        loop_min, loop_max = self._get_loop_position_bounds(clip)
 
         print(f"Attempting to move: direction={direction}, jump_amount={jump_amount}")
-
-        # For warped clips, use end marker instead of clip length
-        if clip.is_audio_clip and clip.warping:
-            effective_clip_length = clip.end_marker
-        else:
-            effective_clip_length = clip.length
-
-        print(f"Effective clip length: {effective_clip_length}")
+        print(f"Loop bounds: start={loop_min}, end={loop_max}")
 
         new_start = clip.loop_start + jump_amount
         new_end = new_start + loop_length
 
         print(f"Calculated new positions: new_start={new_start}, new_end={new_end}")
 
-        # Ensure the loop stays within the effective clip boundaries
-        if new_start >= 0 and new_end <= effective_clip_length:
+        # Ensure the loop stays within the clip boundaries.
+        if new_start >= loop_min and new_end <= loop_max:
             old_start, old_end = clip.loop_start, clip.loop_end
             try:
                 clip.loop_start = new_start
@@ -381,21 +501,21 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
                 # If setting both points fails, try to maintain the loop length
                 try:
                     if direction > 0:
-                        clip.loop_end = min(new_end, effective_clip_length)
-                        clip.loop_start = max(clip.loop_end - loop_length, 0)
+                        clip.loop_end = min(new_end, loop_max)
+                        clip.loop_start = max(clip.loop_end - loop_length, loop_min)
                     else:
-                        clip.loop_start = max(new_start, 0)
-                        clip.loop_end = min(clip.loop_start + loop_length, effective_clip_length)
+                        clip.loop_start = max(new_start, loop_min)
+                        clip.loop_end = min(clip.loop_start + loop_length, loop_max)
                     print(f"Adjusted loop: start={clip.loop_start}, end={clip.loop_end}")
                 except RuntimeError as e2:
                     print(f"Failed to adjust loop: {str(e2)}")
         else:
-            if new_start < 0:
-                print(f"Couldn't move loop: new start ({new_start}) would be less than 0")
-            elif new_end > effective_clip_length:
-                print(f"Couldn't move loop: new end ({new_end}) would exceed effective clip length ({effective_clip_length})")
+            if new_start < loop_min:
+                print(f"Couldn't move loop: new start ({new_start}) would be less than loop boundary ({loop_min})")
+            elif new_end > loop_max:
+                print(f"Couldn't move loop: new end ({new_end}) would exceed loop boundary ({loop_max})")
             else:
-                print(f"Couldn't move loop: unknown boundary issue. new_start={new_start}, new_end={new_end}, effective_clip_length={effective_clip_length}")
+                print(f"Couldn't move loop: unknown boundary issue. new_start={new_start}, new_end={new_end}, loop_min={loop_min}, loop_max={loop_max}")
 
         print("After move attempt:")
         self._print_clip_info(clip)
@@ -449,7 +569,11 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
 
         original_start = clip.start_marker
         original_end = clip.end_marker
+        original_loop_start = clip.loop_start
+        original_loop_end = clip.loop_end
         original_length = original_end - original_start
+        loop_min, loop_max = self._get_loop_position_bounds(clip)
+        minimum_loop_length = 1.0
         print(f"Before any changes: start_marker={original_start}, end_marker={original_end}, length={original_length}")
         print(f"Before any changes: loop_start={clip.loop_start}, loop_end={clip.loop_end}")
         print(f"Current playhead position: {clip.playing_position}")
@@ -457,25 +581,46 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         print(f"Current quantization: {quantization_value}")
         
         if is_button_down:
-            self._temp_loop_start = quantize_beat(clip.playing_position - original_start)
+            self._temp_loop_start = self._get_quantized_playback_position(clip, quantize_beat)
             print(f"Storing temporary loop start: {self._temp_loop_start}")
             clip.looping = False  # Turn off clip looping
             print("Turned off clip looping")
         else:
-            temp_loop_end = quantize_beat(clip.playing_position - original_start)
+            if self._temp_loop_start is None:
+                print("No stored loop start, ignoring loop end release")
+                return
+
+            temp_loop_end = self._get_quantized_playback_position(clip, quantize_beat)
             print(f"Setting quantized loop: temp_loop_start={self._temp_loop_start}, temp_loop_end={temp_loop_end}")
             
             try:
                 clip.looping = True  # Turn on clip looping
                 print("Turned on clip looping")
                 
-                start = max(0, min(self._temp_loop_start, original_length))
-                end = max(start + 1, min(temp_loop_end, original_length))  # Ensure loop is at least 1 beat long
-                clip.loop_start = start
-                clip.loop_end = end
+                max_loop_start = max(loop_min, loop_max - minimum_loop_length)
+                start = max(loop_min, min(self._temp_loop_start, max_loop_start))
+                end = max(start + minimum_loop_length, min(temp_loop_end, loop_max))  # Ensure loop is at least 1 beat long
+                
+                # Try setting end first, then start
+                try:
+                    clip.loop_end = end
+                    clip.loop_start = start
+                except Exception:
+                    # If that fails, try setting start first, then end
+                    try:
+                        clip.loop_start = start
+                        clip.loop_end = end
+                    except Exception as e:
+                        print(f"Error setting loop points: {str(e)}")
+                        # If both attempts fail, revert to original loop points
+                        clip.loop_start = original_loop_start
+                        clip.loop_end = original_loop_end
+                
                 print(f"Set loop_start to {clip.loop_start}, loop_end to {clip.loop_end}")
             except Exception as e:
                 print(f"Error setting loop points: {str(e)}")
+            finally:
+                self._temp_loop_start = None
 
         print(f"Final state: loop_start={clip.loop_start}, loop_end={clip.loop_end}")
         print(f"Final state: start_marker={clip.start_marker}, end_marker={clip.end_marker}")
@@ -578,7 +723,13 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         """
         if liveobj_valid(clip):
             try:
+                # Set the view first
+                self.application().view.show_view('Detail/Clip')
+                
+                # Then set the detail clip
                 self.song().view.detail_clip = clip
+                
+                # Finally set the track and scene
                 clip_slot = clip.canonical_parent
                 if liveobj_valid(clip_slot):
                     track = clip_slot.canonical_parent
@@ -588,6 +739,8 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
                             self.song().view.selected_scene = self.song().scenes[scene_index]
                         self.song().view.selected_track = track
                 self.log_message(f"Focused on clip: {clip.name}")
+                # Update side buttons immediately after focusing
+                self._update_side_buttons()
             except Exception as e:
                 self.log_message(f"Error focusing on clip: {str(e)}")
 
@@ -598,60 +751,175 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
             # self.log_message("No matrix available for display update")
             return
 
-        for i, clip_slot in enumerate(self._clip_slots):
-            y_offset = i * 2
-            if clip_slot is not None and clip_slot.has_clip and clip_slot.clip.is_audio_clip:
-                clip = clip_slot.clip
-                clip_length = clip.end_marker - clip.start_marker
-                loop_start_exact = (clip.loop_start - clip.start_marker) * 8 / clip_length
-                loop_end_exact = (clip.loop_end - clip.start_marker) * 8 / clip_length
-                playhead_exact = (clip.playing_position - clip.start_marker) * 8 / clip_length
-                
-                # self.log_message(f"Updating display for Clip {i}: loop_start={loop_start_exact}, loop_end={loop_end_exact}, playhead={playhead_exact}")
-                # self.log_message(f"Clip {i} details: length={clip_length}, playing_position={clip.playing_position}")
-                
-                # Use the new color handling function
-                clip_color_value = self.get_clip_color(clip)
-                
-                # Update top row (loop and playhead)
-                for x in range(8):
-                    button_start = x
-                    button_end = x + 1
-                    
-                    if button_start <= playhead_exact < button_end:
-                        # self.log_message(f"Setting playhead color for Clip {i} at position {x} to {clip_color_value}")
-                        self._matrix.get_button(x, y_offset).set_light("ClipLooper.Playhead") #Playhead
-                    elif button_start <= loop_start_exact < button_end or (x == 0 and loop_start_exact == 8):
-                        self._matrix.get_button(x, y_offset).send_value(clip_color_value, channel=0) #LoopStart
-                    elif button_start < loop_end_exact <= button_end:
-                        self._matrix.get_button(x, y_offset).send_value(clip_color_value, channel=0) #LoopEnd
-                    elif loop_start_exact < button_start and button_end <= loop_end_exact:
-                        self._matrix.get_button(x, y_offset).send_value(clip_color_value, channel=0) #LoopOn
-                    else:
-                        self._matrix.get_button(x, y_offset).set_light("ClipLooper.LoopOff")
+        num_clip_rows = 3 # Max clips this component handles
 
-                # Update bottom row (controls)
-                for x in range(8):
-                    if x == 0:
-                        self._matrix.get_button(x, y_offset + 1).set_light("ClipLooper.SetLoop")
-                    elif x == 1:
-                        self._matrix.get_button(x, y_offset + 1).set_light("ClipLooper.MoveLeft")
-                    elif x == 2:
-                        self._matrix.get_button(x, y_offset + 1).set_light("ClipLooper.MoveRight")
-                    elif x == 4:
-                        self._matrix.get_button(x, y_offset + 1).set_light("ClipLooper.DoubleLoop")
-                    elif x == 3:
-                        self._matrix.get_button(x, y_offset + 1).set_light("ClipLooper.HalveLoop")
-                    # elif button_start <= loop_start_exact < button_end or button_start < loop_end_exact <= button_end or (loop_start_exact < button_start and button_end <= loop_end_exact):
-                    #     self._matrix.get_button(x, y_offset + 1).set_light("ClipLooper.InLoop")
-                    # else:
-                    #     self._matrix.get_button(x, y_offset + 1).set_light("ClipLooper.OutLoop")
-            else:
-                # self.log_message(f"No valid audio clip for slot {i}, setting to dim gray")
-                # Set both rows to dim gray
-                for y in range(2):
+        if self._ignore_top_row:
+            # --- Transport Mode ---
+            # Row 0 is handled by TransportControlComponent
+
+            # --- Draw Transpose Row (Physical Row 1) ---
+            transpose_row_y = 1
+            for clip_index in range(3):
+                clip_valid_for_transpose = (clip_index < len(self._clip_slots) and
+                                            self._clip_slots[clip_index] is not None and
+                                            self._clip_slots[clip_index].has_clip and
+                                            liveobj_valid(self._clip_slots[clip_index].clip) and
+                                            self._clip_slots[clip_index].clip.is_audio_clip)
+
+                down_button_x = clip_index * 2
+                up_button_x = down_button_x + 1
+                clip_color_value = 0 # Default off if invalid
+                if clip_valid_for_transpose:
+                   clip_color_value = self.get_clip_color(self._clip_slots[clip_index].clip)
+
+                # Draw Down Button
+                button_down = self._matrix.get_button(down_button_x, transpose_row_y) # Physical Row 1
+                if button_down:
+                    if clip_valid_for_transpose:
+                        button_down.send_value(clip_color_value, channel=0)
+                    else:
+                        button_down.set_light("DefaultButton.Disabled")
+
+                # Draw Up Button
+                button_up = self._matrix.get_button(up_button_x, transpose_row_y) # Physical Row 1
+                if button_up:
+                    if clip_valid_for_transpose:
+                        button_up.send_value(clip_color_value, channel=0)
+                    else:
+                        button_up.set_light("DefaultButton.Disabled")
+
+            # Turn off remaining buttons in the transpose row (x=6, 7 on Physical Row 1)
+            for x in range(6, self._matrix.width()):
+                 button = self._matrix.get_button(x, transpose_row_y)
+                 if button:
+                     button.set_light("DefaultButton.Disabled")
+
+            # --- Draw Clip Rows (Starting Physical Row 2) ---
+            clip_display_start_row = 2
+            for i in range(num_clip_rows):
+                playhead_row_y = clip_display_start_row + (i * 2) # Physical rows 2, 4, 6
+                control_row_y = playhead_row_y + 1            # Physical rows 3, 5, 7
+
+                # Check if rows are within matrix bounds (safety)
+                if playhead_row_y >= self._matrix.height() or control_row_y >= self._matrix.height():
+                    continue
+
+                clip_slot = self._clip_slots[i] if i < len(self._clip_slots) else None
+
+                if clip_slot is not None and clip_slot.has_clip and liveobj_valid(clip_slot.clip) and clip_slot.clip.is_audio_clip:
+                    clip = clip_slot.clip
+                    if not liveobj_valid(clip):
+                        self.log_message(f"Clip in slot {i} became invalid during update, clearing display.")
+                        self._clear_clip_display_rows_from_matrix(playhead_row_y, control_row_y)
+                        continue
+
+                    clip_length = clip.end_marker - clip.start_marker
+                    loop_start_exact = (clip.loop_start - clip.start_marker) * 8 / clip_length if clip_length > 0 else 0
+                    loop_end_exact = (clip.loop_end - clip.start_marker) * 8 / clip_length if clip_length > 0 else 0
+                    playhead_exact = (clip.playing_position - clip.start_marker) * 8 / clip_length if clip_length > 0 else 0
+                    clip_color_value = self.get_clip_color(clip)
+
+                    # Update top row (loop and playhead) - use playhead_row_y
                     for x in range(8):
-                        self._matrix.get_button(x, y_offset + y).set_light("ClipLooper.Disabled")
+                        button = self._matrix.get_button(x, playhead_row_y)
+                        if not button: continue
+                        button_start, button_end = x, x + 1
+                        if button_start <= playhead_exact < button_end: button.set_light("ClipLooper.Playhead")
+                        elif button_start <= loop_start_exact < button_end or (x == 0 and loop_start_exact >= 8): button.send_value(clip_color_value, channel=0)
+                        elif button_start < loop_end_exact <= button_end: button.send_value(clip_color_value, channel=0)
+                        elif loop_start_exact < button_start and button_end <= loop_end_exact: button.send_value(clip_color_value, channel=0)
+                        else: button.set_light("ClipLooper.LoopOff")
+
+                    # Update bottom row (controls) - use control_row_y
+                    for x in range(8):
+                        button = self._matrix.get_button(x, control_row_y)
+                        if not button: continue
+                        if x == 0: button.set_light("ClipLooper.SetLoop")
+                        elif x == 1: button.set_light("ClipLooper.MoveLeft")
+                        elif x == 2: button.set_light("ClipLooper.MoveRight")
+                        elif x == 4: button.set_light("ClipLooper.DoubleLoop")
+                        elif x == 3: button.set_light("ClipLooper.HalveLoop")
+                        elif x == 5: button.set_light("ClipLooper.ShrinkLoop")
+                        elif x == 6: button.set_light("ClipLooper.GrowLoop")
+                        elif x == 7:
+                            # Toggle Loop button - use clip color when loop is on, off when loop is off
+                            if clip.looping:
+                                button.send_value(clip_color_value, channel=0)
+                            else:
+                                button.set_light("ClipLooper.Disabled")
+                        else: button.set_light("ClipLooper.Disabled")
+                else:
+                    # Clear the display for this clip slot if no valid clip
+                    self._clear_clip_display_rows_from_matrix(playhead_row_y, control_row_y)
+
+            # --- Clear Remaining Rows (None needed in transport mode as 0-7 are used) ---
+
+        else: # Normal mode (not ignoring top row)
+            # --- Draw Clip Rows (Starting Physical Row 0) ---
+            clip_display_start_row = 0
+            for i in range(num_clip_rows):
+                playhead_row_y = clip_display_start_row + (i * 2) # Physical rows 0, 2, 4
+                control_row_y = playhead_row_y + 1            # Physical rows 1, 3, 5
+
+                 # Check if rows are within matrix bounds (safety)
+                if playhead_row_y >= self._matrix.height() or control_row_y >= self._matrix.height():
+                    continue
+
+                clip_slot = self._clip_slots[i] if i < len(self._clip_slots) else None
+
+                if clip_slot is not None and clip_slot.has_clip and liveobj_valid(clip_slot.clip) and clip_slot.clip.is_audio_clip:
+                    clip = clip_slot.clip
+                    if not liveobj_valid(clip):
+                        self.log_message(f"Clip in slot {i} became invalid during update, clearing display.")
+                        self._clear_clip_display_rows_from_matrix(playhead_row_y, control_row_y)
+                        continue
+
+                    clip_length = clip.end_marker - clip.start_marker
+                    loop_start_exact = (clip.loop_start - clip.start_marker) * 8 / clip_length if clip_length > 0 else 0
+                    loop_end_exact = (clip.loop_end - clip.start_marker) * 8 / clip_length if clip_length > 0 else 0
+                    playhead_exact = (clip.playing_position - clip.start_marker) * 8 / clip_length if clip_length > 0 else 0
+                    clip_color_value = self.get_clip_color(clip)
+
+                    # Update top row (loop and playhead) - use playhead_row_y
+                    for x in range(8):
+                        button = self._matrix.get_button(x, playhead_row_y)
+                        if not button: continue
+                        button_start, button_end = x, x + 1
+                        if button_start <= playhead_exact < button_end: button.set_light("ClipLooper.Playhead")
+                        elif button_start <= loop_start_exact < button_end or (x == 0 and loop_start_exact >= 8): button.send_value(clip_color_value, channel=0)
+                        elif button_start < loop_end_exact <= button_end: button.send_value(clip_color_value, channel=0)
+                        elif loop_start_exact < button_start and button_end <= loop_end_exact: button.send_value(clip_color_value, channel=0)
+                        else: button.set_light("ClipLooper.LoopOff")
+
+                    # Update bottom row (controls) - use control_row_y
+                    for x in range(8):
+                        button = self._matrix.get_button(x, control_row_y)
+                        if not button: continue
+                        if x == 0: button.set_light("ClipLooper.SetLoop")
+                        elif x == 1: button.set_light("ClipLooper.MoveLeft")
+                        elif x == 2: button.set_light("ClipLooper.MoveRight")
+                        elif x == 4: button.set_light("ClipLooper.DoubleLoop")
+                        elif x == 3: button.set_light("ClipLooper.HalveLoop")
+                        elif x == 5: button.set_light("ClipLooper.ShrinkLoop")
+                        elif x == 6: button.set_light("ClipLooper.GrowLoop")
+                        elif x == 7:
+                            # Toggle Loop button - use clip color when loop is on, off when loop is off
+                            if clip.looping:
+                                button.send_value(clip_color_value, channel=0)
+                            else:
+                                button.set_light("ClipLooper.Disabled")
+                        else: button.set_light("ClipLooper.Disabled")
+                else:
+                    # Clear the display for this clip slot if no valid clip
+                    self._clear_clip_display_rows_from_matrix(playhead_row_y, control_row_y)
+
+            # --- Clear Remaining Rows ---
+            start_clear_row = clip_display_start_row + (num_clip_rows * 2) # Should be 6
+            for y in range(start_clear_row, self._matrix.height()): # Clear physical rows 6, 7
+                for x in range(self._matrix.width()):
+                    button = self._matrix.get_button(x, y)
+                    if button:
+                        button.set_light("ClipLooper.Disabled")
 
         self._update_side_buttons()
 
@@ -697,19 +965,77 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         return ((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2) ** 0.5
 
     def _update_side_buttons(self):
-        for i, clip_slot in enumerate(self._clip_slots):
-            if self._side_buttons and i < len(self._side_buttons):
-                button = self._side_buttons[i]
-                if clip_slot and clip_slot.has_clip:
-                    clip = clip_slot.clip
-                    clip_color_value = self.get_clip_color(clip)
-                    button.send_value(clip_color_value, channel=0)
-                else:
-                    button.set_light("DefaultButton.Disabled")
+        if not self._side_buttons:
+            return
+
+        # Reset all side buttons first
+        for button in self._side_buttons:
+            if button:
+                 button.set_light("DefaultButton.Disabled")
+
+        # Update focus buttons (2, 4, 6) and play/toggle buttons (3, 5, 7)
+        for clip_index, clip_slot in enumerate(self._clip_slots):
+            focus_button_index = (clip_index * 2) + 2
+            toggle_button_index = (clip_index * 2) + 3
+
+            focus_button = self._side_buttons[focus_button_index] if focus_button_index < len(self._side_buttons) else None
+            toggle_button = self._side_buttons[toggle_button_index] if toggle_button_index < len(self._side_buttons) else None
+            
+            if clip_slot and clip_slot.has_clip:
+                clip = clip_slot.clip
+                clip_color_value = self.get_clip_color(clip)
+                is_selected = (clip_index == self._selected_clip_index)
+                is_playing = clip.is_playing
+                is_triggered = clip.is_triggered
+                
+                # Update Focus Button (2, 4, 6)
+                if focus_button:
+                    if is_selected:
+                        focus_button.send_value(clip_color_value, channel=0) # Normal color for selected
+                    else:
+                        dim_color_value = 2 # Ultimate Gray for non-selected focus button
+                        focus_button.send_value(dim_color_value, channel=0)
+                        
+                # Update Mute/Toggle Button (3, 5, 7)
+                if toggle_button:
+                    track = None
+                    if clip_slot and liveobj_valid(clip_slot):
+                       track = clip_slot.canonical_parent
+                    
+                    if track and liveobj_valid(track):
+                        if track.mute:
+                            muted_color_value = 13 # Yellow (Rape Blossoms)
+                            toggle_button.send_value(muted_color_value, channel=0)
+                        else: # Unmuted
+                            # Turn the button off when unmuted
+                            unmuted_color_value = 0 # 0 usually means off
+                            toggle_button.send_value(unmuted_color_value, channel=0)
+                    elif clip_slot and clip_slot.has_clip: # Track might be invalid but clip exists? Treat as unmuted (off).
+                         unmuted_color_value = 0
+                         toggle_button.send_value(unmuted_color_value, channel=0)
+                    else: # No clip or track
+                         toggle_button.set_light("DefaultButton.Disabled") # Keep it off / disabled
+
+            else: # No clip in slot
+                 # Ensure focus/toggle buttons for this index are off
+                 if focus_button:
+                     focus_button.set_light("DefaultButton.Disabled")
+                 if toggle_button:
+                     toggle_button.set_light("DefaultButton.Disabled")
 
     def _update_nav_buttons(self):
+        pass # Nav buttons not currently used for specific feedback in this component
 
-        pass
+    def _clear_clip_display_rows_from_matrix(self, row1_y, row2_y):
+        """ Clears two specific rows on the matrix. """
+        if not self._matrix:
+            return
+        for y in [row1_y, row2_y]:
+             if 0 <= y < self._matrix.height():
+                 for x in range(self._matrix.width()):
+                     button = self._matrix.get_button(x, y)
+                     if button:
+                         button.set_light("ClipLooper.Disabled")
 
     def _clear_clip_display(self, index):
         y_offset = index * 2
@@ -722,31 +1048,43 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         if self._is_enabled != enable:
             self._is_enabled = enable
             if self._is_enabled:
+                self.application().view.show_view('Detail/Clip') # Ensure clip detail view
                 self._update_timer.start()
                 self._setup_clip_listeners()
+                self._setup_track_listeners()
                 self.update_clip_slots()
                 self._update_display()
             else:
                 self._update_timer.stop()
                 self._clear_display()
                 self._remove_clip_listeners()
+                self._remove_track_listeners()
+                self._reset_state()
             self.update()
         print(f"ClipLooper: ClipLooperComponent enabled state: {self._is_enabled}")
 
     def _clear_display(self):
         if self._matrix:
-            for x in range(8):
-                for y in range(6):
-                    self._matrix.get_button(x, y).set_light("ClipLooper.Disabled")
+            if self._ignore_top_row:
+                start_row = 1 # Don't clear transport row 0
+            else:
+                start_row = 0 # Clear from row 0
+            end_row = self._matrix.height()
+            for y in range(start_row, end_row):
+                for x in range(self._matrix.width()):
+                    button = self._matrix.get_button(x, y)
+                    if button:
+                         # Use a generic 'off' state
+                         button.set_light("DefaultButton.Disabled")
         if self._side_buttons:
             for button in self._side_buttons:
-                button.set_light("DefaultButton.Disabled")
-
-
-        super(ClipLooperComponent, self).disconnect()
+                 if button: # Check if button exists
+                     button.set_light("DefaultButton.Disabled")
+        # Do not call super disconnect here, it should be handled by the owner component (MainSelectorComponent)
+        # super(ClipLooperComponent, self).disconnect()
 
     def _setup_clip_listeners(self):
-        print("ClipLooper: Setting up clip listeners")
+        self.log_message("Setting up clip listeners")
         if not self._is_enabled:
             print("ClipLooper: ClipLooperComponent is not enabled, skipping setup of clip listeners")
             return
@@ -789,8 +1127,12 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         self._update_display()
 
     def log_message(self, message):
-        if hasattr(self, '_control_surface') and hasattr(self._control_surface, 'log_message'):
-            self._control_surface.log_message(f"ClipLooper: {message}")
+        # Check for control_surface attribute before logging
+        if hasattr(self, '_control_surface') and self._control_surface and hasattr(self._control_surface, 'log_message'):
+            try:
+                self._control_surface.log_message(f"ClipLooper: {message}")
+            except Exception as e:
+                print(f"ClipLooper Log Error: {e}")
         else:
             print(f"ClipLooper: {message}")
 
@@ -806,9 +1148,69 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
                     clip.remove_color_listener(self._on_clip_color_changed)
         print("ClipLooper: Removed all clip listeners")
 
+    def _reset_state(self):
+        print("ClipLooper: Resetting state")
+        self._clip_slots = []
+        self._playhead_position = []
+        self._loop_start = []
+        self._loop_end = []
+        self._temp_loop_start = None
+        self._selected_clip_index = -1
+        self._is_setting_loop = False
+
+    def _setup_track_listeners(self):
+        self.log_message("Setting up track listeners")
+        if not self._is_enabled:
+            self.log_message("ClipLooperComponent is not enabled, skipping setup of track listeners")
+            return
+            
+        self._remove_track_listeners()  # Remove existing listeners first
+        
+        song = self.song()
+        track_offset = self._session_component.track_offset()
+        self._monitored_tracks = []
+        
+        for track_index in range(3):  # Monitor 3 tracks
+            absolute_track_index = track_offset + track_index
+            if absolute_track_index < len(song.tracks):
+                track = song.tracks[absolute_track_index]
+                if liveobj_valid(track):
+                    self._monitored_tracks.append(track) # Store valid tracks
+                    # Add fired_slot_index listener
+                    if not track.fired_slot_index_has_listener(self._on_track_fired_slot_index_changed):
+                        track.add_fired_slot_index_listener(self._on_track_fired_slot_index_changed)
+                        self.log_message(f"Added fired_slot_index listener to track {absolute_track_index}")
+                    # Add mute listener
+                    if not track.mute_has_listener(self._on_track_mute_changed):
+                         track.add_mute_listener(self._on_track_mute_changed)
+                         self.log_message(f"Added mute listener to track {absolute_track_index}")
+        
+    def _on_track_fired_slot_index_changed(self):
+        self.log_message("Track fired slot index changed")
+        # This will refresh which clips we're monitoring
+        self.update_clip_slots()
+        self._update_display()
+
+    def _on_track_mute_changed(self):
+        self.log_message("Track mute changed")
+        self.update() # Trigger a display update
+        
+    def _remove_track_listeners(self):
+        self.log_message("Removing track listeners")
+        for track in self._monitored_tracks:
+            if liveobj_valid(track):
+                # Remove fired_slot_index listener
+                if track.fired_slot_index_has_listener(self._on_track_fired_slot_index_changed):
+                    track.remove_fired_slot_index_listener(self._on_track_fired_slot_index_changed)
+                # Remove mute listener
+                if track.mute_has_listener(self._on_track_mute_changed):
+                    track.remove_mute_listener(self._on_track_mute_changed)
+        self._monitored_tracks = []
+
     def disconnect(self):
         print("ClipLooper: Disconnecting")
         self._remove_clip_listeners()
+        self._remove_track_listeners()
         self._on_clip_playing_status_changed.subject = None
         if self._side_buttons:
             for button in self._side_buttons:
@@ -820,6 +1222,189 @@ class ClipLooperComponent(CompoundComponent, SlotManager):
         self._matrix = None  # Clear matrix reference
         self._side_buttons = None  # Clear side buttons reference
         self._nav_buttons = None  # Clear nav buttons reference
+        # Stop and clear transposition timers
+        for i in range(len(self._transpose_up_timers)):
+             self._on_transpose_up_released(i) # Use release helper to stop/clear
+        for i in range(len(self._transpose_down_timers)):
+             self._on_transpose_down_released(i) # Use release helper to stop/clear
         super(ClipLooperComponent, self).disconnect()
         print("ClipLooper: Disconnection complete")
+
+    def _get_quantization_beat_value(self):
+        """ Returns the current global quantization value in beats. """
+        song = self.song()
+        quantization_value = song.clip_trigger_quantization
+        quant_grid = {
+            Live.Song.Quantization.q_no_q: 0.0, # Should handle no quantization case
+            Live.Song.Quantization.q_8_bars: 32.0,
+            Live.Song.Quantization.q_4_bars: 16.0,
+            Live.Song.Quantization.q_2_bars: 8.0,
+            Live.Song.Quantization.q_bar: 4.0,
+            Live.Song.Quantization.q_half: 2.0,
+            Live.Song.Quantization.q_quarter: 1.0,
+            Live.Song.Quantization.q_eight: 0.5,
+            Live.Song.Quantization.q_sixtenth: 0.25,
+            Live.Song.Quantization.q_thirtytwoth: 0.125
+        }
+        # Default to clip's minimum if quantization is off or unknown
+        return quant_grid.get(quantization_value, MIN_LOOP_LENGTH_BEATS)
+
+    def _adjust_loop_length_by_quantization(self, clip, direction):
+        """ Increases or decreases the loop end by the current quantization value. """
+        if not liveobj_valid(clip):
+            self.log_message("Invalid clip object for loop adjustment")
+            return
+
+        quant_beats = self._get_quantization_beat_value()
+        if quant_beats <= 0:
+            self.log_message(f"Cannot adjust loop length: quantization value is zero or negative ({quant_beats})")
+            return
+
+        change_amount = direction * quant_beats
+        current_loop_start = clip.loop_start
+        current_loop_end = clip.loop_end
+        new_loop_end = current_loop_end + change_amount
+
+        # Loop points are absolute for warped audio clips and relative-to-zero otherwise.
+        if clip.is_audio_clip and clip.warping:
+            max_loop_end = clip.end_marker
+        else:
+            max_loop_end = clip.length
+
+        self.log_message(f"Adjusting loop: current_start={current_loop_start}, current_end={current_loop_end}, change={change_amount}, max_end={max_loop_end}")
+
+        # --- Validation ---
+        # 1. Ensure new end is after start.
+        if new_loop_end <= current_loop_start:
+            self.log_message(f"Cannot adjust loop: new end ({new_loop_end}) would be before or at start ({current_loop_start})")
+            return
+
+        # 2. Ensure new end stays inside the clip boundary.
+        if new_loop_end > max_loop_end:
+            self.log_message(f"Cannot adjust loop: new end ({new_loop_end}) would exceed clip boundary ({max_loop_end})")
+            return
+
+        # 3. Ensure minimum loop length.
+        if (new_loop_end - current_loop_start) < MIN_LOOP_LENGTH_BEATS:
+            self.log_message(f"Cannot adjust loop: new length ({new_loop_end - current_loop_start}) would be less than minimum ({MIN_LOOP_LENGTH_BEATS})")
+            return
+
+        # --- Apply Change ---
+        try:
+            clip.loop_end = new_loop_end
+            self.log_message(f"Adjusted loop end: old={current_loop_end}, new={clip.loop_end}")
+        except Exception as e:
+            self.log_message(f"Error adjusting loop end: {str(e)}")
+            # Attempt to restore original value if setting failed
+            try:
+                clip.loop_end = current_loop_end
+            except:
+                pass # Avoid nested exceptions
+
+        self._print_clip_info(clip)
+        self._focus_on_clip(clip) # Keep focus after adjustment
+
+    # --- Transposition Control (Triggered by Matrix) --- #
+
+    def _on_transpose_up_pressed(self, index):
+        if self._change_transpose(index, 1):
+            # Focus the clip if transposition was successful
+            self._selected_clip_index = index # Set the selected index
+            clip_slot = self._clip_slots[index]
+            if clip_slot and clip_slot.has_clip:
+                self._focus_on_clip(clip_slot.clip)
+                
+            if self._transpose_up_timers[index] is not None:
+                self._transpose_up_timers[index].stop()
+            self._transpose_up_timers[index] = Live.Base.Timer(callback=lambda: self._repeat_transpose_up(index), interval=TRANSPOSE_REPEAT_DELAY, start=True)
+            self.log_message(f"Transpose Up Pressed (Clip {index}), starting timer.")
+
+    def _on_transpose_down_pressed(self, index):
+        if self._change_transpose(index, -1):
+            # Focus the clip if transposition was successful
+            self._selected_clip_index = index # Set the selected index
+            clip_slot = self._clip_slots[index]
+            if clip_slot and clip_slot.has_clip:
+                self._focus_on_clip(clip_slot.clip)
+
+            if self._transpose_down_timers[index] is not None:
+                self._transpose_down_timers[index].stop()
+            self._transpose_down_timers[index] = Live.Base.Timer(callback=lambda: self._repeat_transpose_down(index), interval=TRANSPOSE_REPEAT_DELAY, start=True)
+            self.log_message(f"Transpose Down Pressed (Clip {index}), starting timer.")
+
+    def _on_transpose_up_released(self, index):
+        if index < len(self._transpose_up_timers) and self._transpose_up_timers[index] is not None:
+            self._transpose_up_timers[index].stop()
+            self._transpose_up_timers[index] = None
+            self.log_message(f"Transpose Up Released (Clip {index}), stopping timer.")
+
+    def _on_transpose_down_released(self, index):
+        if index < len(self._transpose_down_timers) and self._transpose_down_timers[index] is not None:
+            self._transpose_down_timers[index].stop()
+            self._transpose_down_timers[index] = None
+            self.log_message(f"Transpose Down Released (Clip {index}), stopping timer.")
+
+    def _repeat_transpose_up(self, index):
+        if self._change_transpose(index, 1):
+            if index < len(self._transpose_up_timers) and self._transpose_up_timers[index] is not None:
+                self._transpose_up_timers[index].stop() # Stop the old timer
+                # Create and start a new timer with the faster interval
+                self._transpose_up_timers[index] = Live.Base.Timer(callback=lambda: self._repeat_transpose_up(index), interval=TRANSPOSE_REPEAT_INTERVAL, start=True)
+                self.log_message(f"Repeat Transpose Up (Clip {index}), interval {TRANSPOSE_REPEAT_INTERVAL}.")
+            else:
+                self.log_message(f"Repeat Transpose Up (Clip {index}) - Timer Error or Index Out of Bounds!")
+        else:
+             self._on_transpose_up_released(index) # Stop repeating if change failed
+
+    def _repeat_transpose_down(self, index):
+        if self._change_transpose(index, -1):
+            if index < len(self._transpose_down_timers) and self._transpose_down_timers[index] is not None:
+                self._transpose_down_timers[index].stop() # Stop the old timer
+                # Create and start a new timer with the faster interval
+                self._transpose_down_timers[index] = Live.Base.Timer(callback=lambda: self._repeat_transpose_down(index), interval=TRANSPOSE_REPEAT_INTERVAL, start=True)
+                self.log_message(f"Repeat Transpose Down (Clip {index}), interval {TRANSPOSE_REPEAT_INTERVAL}.")
+            else:
+                self.log_message(f"Repeat Transpose Down (Clip {index}) - Timer Error or Index Out of Bounds!")
+        else:
+            self._on_transpose_down_released(index) # Stop repeating if change failed
+
+    def _change_transpose(self, index, delta):
+        if 0 <= index < len(self._clip_slots):
+            clip_slot = self._clip_slots[index]
+            if clip_slot and clip_slot.has_clip:
+                clip = clip_slot.clip
+                if liveobj_valid(clip) and clip.is_audio_clip: # Only transpose audio clips for now
+                    current_pitch = clip.pitch_coarse
+                    new_pitch = max(-48, min(48, current_pitch + delta)) # Limit to +/- 48 semitones
+                    if new_pitch != current_pitch:
+                        clip.pitch_coarse = new_pitch
+                        self.log_message(f"Changed Clip {index} pitch_coarse from {current_pitch} to {new_pitch}")
+                        return True
+                    else:
+                        self.log_message(f"Clip {index} pitch already at limit ({current_pitch}).")
+                        return False
+                else:
+                    self.log_message(f"Clip {index} is not a valid audio clip for transposition.")
+                    return False
+            else:
+                self.log_message(f"No valid clip at index {index} for transposition.")
+                return False
+        self.log_message(f"Invalid index {index} for transposition.")
+        return False
+
+    def _toggle_loop(self, clip):
+        """Toggle the clip's looping state on/off."""
+        if not liveobj_valid(clip):
+            self.log_message("Invalid clip object for loop toggle")
+            return
+            
+        try:
+            # Toggle the looping state
+            new_looping_state = not clip.looping
+            clip.looping = new_looping_state
+            self.log_message(f"Toggled clip looping: {clip.looping}")
+        except Exception as e:
+            self.log_message(f"Error toggling loop state: {str(e)}")
+
+        self._print_clip_info(clip)
 
