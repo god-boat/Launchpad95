@@ -20,12 +20,12 @@ class Settings():
     USER_MODES_1 = [
 		"instrument"
 		, "device"
-		,"user 1"
+		# ,"user 1"
     ]
     USER_MODES_2 = [
 		"drum stepseq"
 		, "melodic stepseq"
-		,"user 2"
+		# ,"user 2"
     ]
 
     # Device control mode
