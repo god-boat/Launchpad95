@@ -49,7 +49,14 @@ class ScaleComponent(ControlSurfaceComponent):
 		self._minor_modes = [1, 13, 14]#Natural, Harmonic, Melodic
 		
 		super(ScaleComponent, self).__init__(*a, **k)
-		self.set_enabled(enabled)
+		# Register listeners on init, regardless of initial enabled state
+		self._register_scale_listeners()
+		self.set_enabled(enabled) # Keep this to set initial state if needed
+
+	def disconnect(self):
+		""" Clean up resources, including listeners, when the component is disconnected """
+		self._remove_scale_listeners()
+		super(ScaleComponent, self).disconnect()
 
 	def _remove_scale_listeners(self):
 		try:
@@ -85,11 +92,9 @@ class ScaleComponent(ControlSurfaceComponent):
 
 	def set_enabled(self, enabled):
 		ControlSurfaceComponent.set_enabled(self, enabled)
-		if not enabled:
-			self._remove_scale_listeners()
-		else:
-			self._register_scale_listeners()
-		
+		if self.is_enabled():
+			self.update()
+
 	@property
 	def notes(self):
 		return self.modus.scale(self._key).notes
@@ -100,12 +105,13 @@ class ScaleComponent(ControlSurfaceComponent):
 
 	def set_key(self, key, message = True, listener_called = False):
 		if key>=0 and key<=11:
-			self._key = key % 12
-			if not listener_called:
-				self.song().root_note=self._key
-			if message:
-				self._control_surface.show_message(str("Selected Scale: " + KEY_NAMES[self._key])+" "+str(self._modus_names[self._modus]))
-		
+			if self._key != key:
+				self._key = key % 12
+				if not listener_called:
+					self.song().root_note=self._key
+				if message:
+					self._control_surface.show_message(str("Selected Scale: " + KEY_NAMES[self._key])+" "+str(self._modus_names[self._modus]))
+
 	def set_octave(self, octave, message = True):
 		if octave>=0 and octave<self._top_octave:
 			self._octave = octave

@@ -270,11 +270,15 @@ class StepSequencerComponent(CompoundComponent):
 
     def handle_root_note_changed(self):
         self._scale_selector.set_key(self.song().root_note, False, True)
+        self._scale_updated()
+        self._control_surface.schedule_message(1, self._sync_note_selector_selection)
         self.update()
 
 
     def handle_scale_name_changed(self):
         self._scale_selector.set_modus(self._scale_selector._modus_names.index(self.song().scale_name), False, True)
+        self._scale_updated()
+        self._control_surface.schedule_message(1, self._sync_note_selector_selection)
         self.update()
         
 
@@ -294,30 +298,56 @@ class StepSequencerComponent(CompoundComponent):
 
             # sync to selected pad
             self._update_drum_group_device()
-            if(self._drum_group_device): #Select the note 
-                self._note_selector.set_selected_note(self.index_of(self._drum_group_device.drum_pads,self._drum_group_device.view.selected_drum_pad)) #FIX set view again
+            if(self._drum_group_device): #Select the note
+                # Defer drum pad selection sync slightly if needed
+                self._control_surface.schedule_message(1, self._sync_drum_pad_selection)
+                # self._note_selector.set_selected_note(self.index_of(self._drum_group_device.drum_pads,self._drum_group_device.view.selected_drum_pad)) #FIX set view again
 
-            self._track_controller.set_enabled(enabled)    
+            self._track_controller.set_enabled(enabled)
             self._note_editor.set_enabled(enabled)
             # update clip notes as they might have changed while we were sleeping
-            self.on_clip_slot_changed()
-            # call super.set_enabled()
+            self.on_clip_slot_changed() # This will call _clip_changed -> _on_notes_changed if needed
             CompoundComponent.set_enabled(self, enabled)
+            self._remove_scale_listeners()
+            self._register_scale_listeners()
+
+            if self._scale_selector:
+                try:
+                    current_live_root = self.song().root_note
+                    self._scale_selector.set_key(current_live_root, False, True)
+
+                    current_live_scale_name = self.song().scale_name
+                    if current_live_scale_name in self._scale_selector._modus_names:
+                        modus_index = self._scale_selector._modus_names.index(current_live_scale_name)
+                        self._scale_selector.set_modus(modus_index, False, True)
+
+                    self._scale_updated()
+                    self._control_surface.schedule_message(1, self._sync_note_selector_selection)
+
+                except Exception:
+                    pass
+
             if self._clip != None and self._is_locked:
                 self._control_surface.show_message("stepseq : clip '"+str(self._clip.name)+"'")
-            self._on_notes_changed()
             self._update_OSD()
 
         else:
+            self._remove_scale_listeners()
             self._track_controller.set_enabled(enabled)
             self._loop_selector.set_enabled(enabled)
             self._note_selector.set_enabled(enabled)
             self._note_editor.set_enabled(enabled)
             CompoundComponent.set_enabled(self, enabled)
-        if not enabled:
-            self._remove_scale_listeners()
-        else:
-            self._register_scale_listeners()
+
+    def _sync_drum_pad_selection(self):
+        """Deferred method to sync drum pad selection."""
+        if self.is_enabled() and self._drum_group_device and self._drum_group_device.view.selected_drum_pad:
+            try:
+                pad_index = self.index_of(self._drum_group_device.drum_pads, self._drum_group_device.view.selected_drum_pad)
+                if pad_index != -1:
+                    self._note_selector.set_selected_note(pad_index)
+            except Exception:
+                pass
 
     def set_mode(self, mode, number_of_lines_per_note=1):
         if self._mode != mode or number_of_lines_per_note != self._number_of_lines_per_note:
@@ -358,31 +388,56 @@ class StepSequencerComponent(CompoundComponent):
                 key_is_root_note[i] = (keys[i] + 12 + 16) % 16 == 0
                 key_is_in_scale[i] = (keys[i] + 12 + 16) % 4 == 0
         elif self._note_selector.is_diatonic:
-            self._note_selector._scale_length = len(self._note_selector._scale)
-            try:
-                idx = self._note_selector._scale.index(self._note_selector._offset)
-            except ValueError:
-                idx = -1
-            if(idx == -1):
-                self._control_surface.log_message("not found : " + str(self._note_selector._offset) + " in " + str(self._note_selector._scale))
-                for i in range(8):
-                    keys[i] = self._note_selector._root_note + self._note_selector._offset + i
+            # Check if _scale exists and has length before proceeding
+            if hasattr(self._note_selector, '_scale') and self._note_selector._scale and len(self._note_selector._scale) > 0:
+                self._note_selector._scale_length = len(self._note_selector._scale)
+                try:
+                    idx = self._note_selector._scale.index(self._note_selector._offset)
+                except ValueError:
+                    idx = -1
+                if(idx == -1):
+                    # Fallback logic if offset isn't in scale (e.g., chromatic calculation)
+                    for i in range(8):
+                        keys[i] = self._note_selector.selected_note + i
+                        key_is_root_note[i] = (keys[i] + 12) % 12 == self._note_selector._key
+                        # Check against the actual scale if available
+                        if hasattr(self._note_selector, '_scale') and self._note_selector._scale:
+                            key_is_in_scale[i] = (keys[i] - self._note_selector._key + 12) % 12 in self._note_selector._scale
+                        else:
+                            key_is_in_scale[i] = False # Default if scale is somehow invalid
+                else:
+                    for i in range(8):
+                        keys[i] = self._note_selector._root_note + self._note_selector._scale[(i + idx) % self._note_selector._scale_length] + int((i + idx) / self._note_selector._scale_length) * 12
+                        key_is_root_note[i] = (keys[i] + 12) % 12 == self._note_selector._key
+                        key_is_in_scale[i] = True
             else:
-                for i in range(8):
-                    keys[i] = self._note_selector._root_note + self._note_selector._scale[(i + idx) % self._note_selector._scale_length] + int((i + idx) / self._note_selector._scale_length) * 12
-                    key_is_root_note[i] = (keys[i] + 12) % 12 == self._note_selector._key
-                    key_is_in_scale[i] = True
-        else:
+                 # Handle case where scale is not properly initialized (e.g., chromatic mode)
+                 for i in range(8):
+                     keys[i] = self._note_selector.selected_note + i
+                     key_is_root_note[i] = (keys[i] + 12) % 12 == self._note_selector._key
+                     key_is_in_scale[i] = False # Or True if chromatic?
+        else: # Chromatic
             for i in range(8):
                 keys[i] = self._note_selector.selected_note + i
                 key_is_root_note[i] = (keys[i] + 12) % 12 == self._note_selector._key
-                key_is_in_scale[i] = (keys[i] - self._note_selector._key + 12) % 12 in self._note_selector._scale
-                
+                # Check against the actual scale if available (might be chromatic scale [0..11])
+                if hasattr(self._note_selector, '_scale') and self._note_selector._scale:
+                    key_is_in_scale[i] = (keys[i] - self._note_selector._key + 12) % 12 in self._note_selector._scale
+                else:
+                     key_is_in_scale[i] = True # Assume all notes in scale for chromatic
+
+        # Update Note Editor first
         self._note_editor.set_key_indexes(keys)
         self._note_editor.set_key_index_is_in_scale(key_is_in_scale)
         self._note_editor.set_key_index_is_root_note(key_is_root_note)
         self._update_note_editor()
-        self._update_note_selector()
+
+        # Directly update Note Selector
+        if self._note_selector != None:
+            current_scale = self._scale_selector.notes
+            current_key = self._scale_selector._key
+            self._note_selector.set_scale(current_scale, current_key)
+            self._note_selector.update()
 
 # UPDATE
     def update(self):
@@ -390,9 +445,13 @@ class StepSequencerComponent(CompoundComponent):
             self._update_track_controller()
             self._update_scale_selector()
             self._update_loop_selector()
-            self._update_note_selector()
+            # Update Note Selector's enabled state, but NOT its content update (handled in _scale_updated)
+            if self._note_selector != None:
+                 self._note_selector._enable_offset_button = self._mode == STEPSEQ_MODE_NORMAL
+                 self._note_selector.set_enabled(self._mode != STEPSEQ_MODE_SCALE_EDIT)
+            # self._update_note_selector() # We don't call this wrapper anymore for updates
             self._update_buttons()
-            self._update_note_editor()
+            self._update_note_editor() # This might be redundant if _scale_updated called it
             self._update_OSD()
             # show clip !
             if not self._is_locked and self._clip != None:
@@ -409,13 +468,16 @@ class StepSequencerComponent(CompoundComponent):
         self._scale_selector.update()
 
     def _update_loop_selector(self):
-        self._loop_selector.set_enabled(self._mode == STEPSEQ_MODE_NORMAL)
-        self._loop_selector.update()
+        if self._loop_selector: # Check existence
+            self._loop_selector.set_enabled(self._mode == STEPSEQ_MODE_NORMAL)
+            self._loop_selector.update()
 
-    def _update_note_selector(self):
-        self._note_selector._enable_offset_button = self._mode == STEPSEQ_MODE_NORMAL
-        self._note_selector.set_enabled(self._mode != STEPSEQ_MODE_SCALE_EDIT)
-        self._note_selector.update()
+    # This method now only handles enabling/disabling based on mode (wrapper removed)
+    # def _update_note_selector(self):
+    #     if self._note_selector != None:
+    #         self._note_selector._enable_offset_button = self._mode == STEPSEQ_MODE_NORMAL
+    #         self._note_selector.set_enabled(self._mode != STEPSEQ_MODE_SCALE_EDIT)
+    #     # REMOVED: self._note_selector.update()
 
     def _update_note_editor(self):
         self._note_editor.set_multinote(self._mode == STEPSEQ_MODE_MULTINOTE, self._number_of_lines_per_note)
@@ -580,7 +642,8 @@ class StepSequencerComponent(CompoundComponent):
         self._loop_selector.set_playhead(None)
         # reload notes
         self._on_notes_changed()
-            
+
+    # FIX: fixed note duplication in Live when using the step sequencers        
     def _on_notes_changed(self):  # trigger by callback on clip or via _clip_changed.
         if self.is_enabled():
             # get notes
@@ -678,13 +741,15 @@ class StepSequencerComponent(CompoundComponent):
                 self._mode_backup = self._mode
                 if self._scale_selector != None and self._note_selector != None:
                     self._scale_selector.set_octave(int(self._note_selector._root_note / 12))
-                    self._scale_selector.set_key(self._note_selector._key)
+                    # TODO: this was causing the rote note and scale name to be reset to stale data when openeing scale component from the stepsequncer
+                    # self._scale_selector.set_key(self._note_selector._key)
                     self.set_mode(STEPSEQ_MODE_SCALE_EDIT)
             else:
                 if self._scale_selector != None and self._note_selector != None:
                     self._note_selector.set_scale(self._scale_selector.notes, self._scale_selector._key)
                     self._note_selector.set_selected_note(self._scale_selector._octave * 12 + self._scale_selector._key)
                     self._scale_updated()
+                    self._note_selector.update()
                 self.set_mode(self._mode_backup)
 
 
@@ -715,7 +780,7 @@ class StepSequencerComponent(CompoundComponent):
         assert (value in range(128))
         if self.is_enabled() and self._clip != None:
             now = time.time()
-            if ((value is not 0) or (not sender.is_momentary())):
+            if ((value != 0) or (not sender.is_momentary())):
                 self._is_mute_shifted = not self._is_mute_shifted
             else:
                 if now - self._last_mute_shift_button_press> 0.25:
@@ -754,7 +819,7 @@ class StepSequencerComponent(CompoundComponent):
         assert (self._mode_button != None)
         assert (value in range(128))
         if self.is_enabled() and self._clip != None:
-            if ((value is not 0) or (not sender.is_momentary())):
+            if ((value != 0) or (not sender.is_momentary())):
                 self._last_mode_button_press = time.time()
             else:
                 if self._mode == STEPSEQ_MODE_MULTINOTE and time.time() - self._last_mode_button_press > 0.25:
@@ -795,7 +860,7 @@ class StepSequencerComponent(CompoundComponent):
         assert (value in range(128))
         if self.is_enabled() and self._clip != None:
             now = time.time()
-            if ((value is not 0) or (not sender.is_momentary())):
+            if ((value != 0) or (not sender.is_momentary())):
                 self._last_quantize_button_press = now
             else:
                 if now - self._last_quantize_button_press > 0.5:
@@ -827,7 +892,8 @@ class StepSequencerComponent(CompoundComponent):
         if self._loop_selector != None:
             self._update_loop_selector()
         if self._note_selector != None:
-            self._update_note_selector()
+            self._note_selector.set_scale(self._scale_selector.notes, self._scale_selector._key)
+            self._note_selector.update()
         if self._note_editor != None:
             self._update_note_editor()
         self._update_OSD()
@@ -905,7 +971,7 @@ class StepSequencerComponent(CompoundComponent):
         assert (self._right_button != None)
         assert (value in range(128))
         if self.is_enabled() and self._clip != None:
-            if ((value is not 0) or (not sender.is_momentary())):
+            if ((value != 0) or (not sender.is_momentary())):
                 self._loop_selector.scroll(1)
                 self._note_editor.request_display_page()
                 self.update()
@@ -933,10 +999,10 @@ class StepSequencerComponent(CompoundComponent):
                 self._left_button.add_value_listener(self._left_value, identify_sender=True)
 
     def _left_value(self, value, sender):
-        assert (self._right_button != None)
+        assert (self._left_button != None)
         assert (value in range(128))
         if self.is_enabled() and self._clip != None:
-            if ((value is not 0) or (not sender.is_momentary())):
+            if ((value != 0) or (not sender.is_momentary())):
                 self._loop_selector.scroll(-1)
                 self._note_editor.request_display_page()
                 self.update()
@@ -970,5 +1036,12 @@ class StepSequencerComponent(CompoundComponent):
                 pass
             except RuntimeError:
                 pass
+
+    def _sync_note_selector_selection(self):
+        """Called via schedule_message to sync selection after main update."""
+        if self.is_enabled() and self._note_selector != None and self._scale_selector != None:
+            current_key = self._scale_selector._key
+            new_selected_note = self._scale_selector._octave * 12 + current_key
+            self._note_selector.set_selected_note(new_selected_note)
 
     

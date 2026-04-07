@@ -116,44 +116,8 @@ class MelodicNoteEditorComponent(ControlSurfaceComponent):
 		self._clip = None
 	
 	
-	def _remove_scale_listeners(self):
-		try:
-			self.song().remove_root_note_listener(self.handle_root_note_changed)
-		except RuntimeError:
-			pass
-		try:
-			self.song().remove_scale_name_listener(self.handle_scale_name_changed)
-		except RuntimeError:
-			pass
-		
-	
-	def _register_scale_listeners(self):
-		try:
-			self.song().add_root_note_listener(self.handle_root_note_changed)
-		except RuntimeError:
-			pass
-		try:
-			self.song().add_scale_name_listener(self.handle_scale_name_changed)
-		except RuntimeError:
-			pass
-
-	def handle_root_note_changed(self):
-		self._scale_selector.set_key(self.song().root_note, False, True)
-		self.update()
-
-
-	def handle_scale_name_changed(self):
-		self._scale_selector.set_modus(self._scale_selector._modus_names.index(self.song().scale_name), False, True)
-		self.update()
-		
-		
-
 	def set_enabled(self, enabled):
 		ControlSurfaceComponent.set_enabled(self, enabled)
-		if not enabled:
-			self._remove_scale_listeners()
-		else:
-			self._register_scale_listeners()
 
 	def _init_data(self):
 		pages = 128
@@ -541,7 +505,7 @@ class MelodicNoteEditorComponent(ControlSurfaceComponent):
 		assert (value in range(128))
 		if self.is_enabled() and self._clip != None:
 			self._random_button.set_on_off_values("StepSequencer2.Random.On", "StepSequencer2.Random.Off")
-			if ((value is 0) and (sender.is_momentary())):
+			if ((value == 0) and (sender.is_momentary())):
 				self._random_button.turn_off()
 				self._control_surface.show_message("randomise")
 				self._randomise()
@@ -603,7 +567,7 @@ class MelodicNoteEditorComponent(ControlSurfaceComponent):
 		assert (self._mode_notes_pitches_button != None)
 		assert (value in range(128))
 		if self.is_enabled() and self._clip != None:
-			if ((value is 0) and (sender.is_momentary())):
+			if ((value == 0) and (sender.is_momentary())):
 				self._is_notes_pitches_shifted = False
 				self._is_mute_shifted = False
 				self._is_velocity_shifted = False
@@ -651,7 +615,7 @@ class MelodicNoteEditorComponent(ControlSurfaceComponent):
 		assert (self._mode_notes_octaves_button != None)
 		assert (value in range(128))
 		if self.is_enabled() and self._clip != None:
-			if ((value is 0) and (sender.is_momentary())):
+			if ((value == 0) and (sender.is_momentary())):
 				self._is_notes_octaves_shifted = False
 				self.set_mode(STEPSEQ_MODE_NOTES_OCTAVES)
 				self._control_surface.show_message("octave")
@@ -687,7 +651,7 @@ class MelodicNoteEditorComponent(ControlSurfaceComponent):
 		assert (self._mode_notes_velocities_button != None)
 		assert (value in range(128))
 		if self.is_enabled() and self._clip != None:
-			if ((value is 0) and (sender.is_momentary())):
+			if ((value == 0) and (sender.is_momentary())):
 				self._is_mute_shifted = False
 				self._is_notes_velocities_shifted = False
 				self.set_mode(STEPSEQ_MODE_NOTES_VELOCITIES)
@@ -727,7 +691,7 @@ class MelodicNoteEditorComponent(ControlSurfaceComponent):
 		assert (self._mode_notes_lengths_button != None)
 		assert (value in range(128))
 		if self.is_enabled() and self._clip != None:
-			if ((value is 0) and (sender.is_momentary())):
+			if ((value == 0) and (sender.is_momentary())):
 				self._is_notes_lengths_shifted = False
 				self.set_mode(STEPSEQ_MODE_NOTES_LENGTHS)
 				self.update()
@@ -861,3 +825,97 @@ class StepSequencerComponent2(StepSequencerComponent):
 
 	def _mode_button_value(self, value, sender):
 		pass
+
+	def _remove_scale_listeners(self):
+		try:
+			self.song().remove_root_note_listener(self.handle_root_note_changed)
+		except RuntimeError:
+			pass
+		try:
+			self.song().remove_scale_name_listener(self.handle_scale_name_changed)
+		except RuntimeError:
+			pass
+		
+	
+	def _register_scale_listeners(self):
+		try:
+			self.song().add_root_note_listener(self.handle_root_note_changed)
+		except RuntimeError:
+			pass
+		try:
+			self.song().add_scale_name_listener(self.handle_scale_name_changed)
+		except RuntimeError:
+			pass
+
+	def handle_root_note_changed(self):
+		if self.is_enabled() and self._scale_selector:
+			root_note = self.song().root_note
+			self._scale_selector.set_key(root_note, False, True)
+			self._scale_updated()
+			self.update()
+
+
+	def handle_scale_name_changed(self):
+		if self.is_enabled() and self._scale_selector:
+			scale_name = self.song().scale_name
+			self._scale_selector.set_modus(self._scale_selector._modus_names.index(scale_name), False, True)
+			self._scale_updated()
+			self.update()
+		
+		
+
+	def set_enabled(self, enabled):
+		super(StepSequencerComponent2, self).set_enabled(enabled)
+
+	def _scale_updated(self):
+		if not self.is_enabled() or not self._scale_selector or not self._note_editor:
+			return
+
+		keys = [0] * 8  # Melodic editor expects 8 notes for its logic, even if only 7 rows are used for direct pitch input
+		key_is_root_note = [False] * 8
+		key_is_in_scale = [False] * 8
+
+		# Get scale info directly from the ScaleComponent
+		scale_note_intervals = self._scale_selector.modus.notes # e.g., [0, 2, 4, 5, 7, 9, 11] for Major scale intervals relative to root
+		root_note_midi = self._scale_selector._key               # Root note MIDI value (0-11)
+		selected_octave = self._scale_selector._octave         # Octave index (0-based, e.g., 3)
+
+		# Calculate the base MIDI note for the root in the selected octave
+		# Using the (octave + 1) * 12 logic found in ScaleComponent.get_pattern
+		# This assumes octave 0 = C0 (MIDI 12), octave 1 = C1 (MIDI 24), octave 2 = C2 (MIDI 36), octave 3 = C3 (MIDI 48) etc.
+		root_note_in_octave_midi = ((selected_octave + 1) * 12) + root_note_midi
+
+		scale_len = len(scale_note_intervals)
+		if scale_len == 0: # Prevent division by zero or index errors if scale is empty
+			# Default to chromatic notes starting from the root in the selected octave
+			for i in range(8):
+				keys[i] = root_note_in_octave_midi + i
+				keys[i] = max(0, min(127, keys[i])) # Clamp to MIDI range
+				key_is_root_note[i] = (i == 0) # Only the first note is 'root' in this chromatic fallback
+				key_is_in_scale[i] = True
+		else:
+			for i in range(8): # Calculate 8 notes for the editor's arrays
+				# Determine the scale degree index and the octave offset from the base octave
+				scale_degree_index = i % scale_len
+				octave_offset_from_base = i // scale_len
+
+				# Get the interval for the current scale degree
+				interval = scale_note_intervals[scale_degree_index]
+
+				# Calculate the final MIDI note
+				keys[i] = root_note_in_octave_midi + (octave_offset_from_base * 12) + interval
+
+				# Ensure key stays within MIDI range 0-127
+				keys[i] = max(0, min(127, keys[i]))
+
+				# Determine flags
+				key_is_root_note[i] = (keys[i] % 12) == root_note_midi # Is it the root note pitch class?
+				# Check if the resulting note's pitch class corresponds to an interval in the scale
+				note_pitch_class_relative_to_root = (keys[i] - root_note_midi) % 12
+				key_is_in_scale[i] = note_pitch_class_relative_to_root in scale_note_intervals
+
+		# Update Note Editor
+		self._note_editor.set_key_indexes(keys)
+		self._note_editor.set_key_index_is_root_note(key_is_root_note)
+		self._note_editor.set_key_index_is_in_scale(key_is_in_scale)
+		# No need to call self._note_editor.update() here, as the main self.update() will handle it.

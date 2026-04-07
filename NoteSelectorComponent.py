@@ -1,6 +1,7 @@
 from _Framework.ButtonElement import ButtonElement
 from _Framework.ControlSurfaceComponent import ControlSurfaceComponent
 
+
 #Allows to note selection and navigation through note groups and pages
 class NoteSelectorComponent(ControlSurfaceComponent):
 
@@ -110,7 +111,7 @@ class NoteSelectorComponent(ControlSurfaceComponent):
         assert (self._down_button != None)
         assert (value in range(128))
         if self.is_enabled() and self._clip != None:
-            if value is not 0 or not sender.is_momentary():
+            if value != 0 or not sender.is_momentary():
                 if self.should_scroll():
                     self.scroll_down()
                 else:
@@ -154,7 +155,7 @@ class NoteSelectorComponent(ControlSurfaceComponent):
         assert (self._up_button != None)
         assert (value in range(128))
         if self.is_enabled() and self._clip != None:
-            if value is not 0 or not sender.is_momentary(): #If NOTEON or is Toggle
+            if value != 0 or not sender.is_momentary():
                 #IF [mute_shift and NormalMode-> move(1)] [not mute_shift and MultinoteMode-> move(1)] ELSE move(12|16)_dependingIfdrumRack
                 if self.should_scroll():
                     self.scroll_up()
@@ -256,9 +257,11 @@ class NoteSelectorComponent(ControlSurfaceComponent):
         if key != -1:
             self._key = key
         self._scale = scale
-        # relativise scale
+        # relativise scale (keep this part)
+        new_scale = []
         for i in range(len(self._scale)):
-            self._scale[i] = self._scale[i] - self._key
+            new_scale.append((self._scale[i] - self._key + 12) % 12) # Ensure positive modulo result
+        self._scale = new_scale
 
     #Is the cursor in the current button range and contain a note
     def note_is_playing(self, clip, note_cache, midi_note, playhead):
@@ -353,6 +356,7 @@ class NoteSelectorComponent(ControlSurfaceComponent):
             self._root_note = int((selected_note - self._key) / 12) * 12 + self._key
             self._offset = (selected_note + 12 - self._root_note) % 12
 
+        # Ensure this call doesn't pass sync_selection=True to prevent recursion
         self._step_sequencer._scale_updated()
 
     def set_key(self, key):
@@ -385,5 +389,3 @@ class NoteSelectorComponent(ControlSurfaceComponent):
     def should_scroll(self):
         return not self._is_mute_shifted and not self._enable_offset_button or self._is_mute_shifted and self._enable_offset_button
     #Used in Normal mode (Not Multinote) to delete/copy/mute/change loops regions
-
-
