@@ -52,6 +52,7 @@ class DeviceControllerComponent(DeviceComponent):
         self._is_active = False
         self._force = True
         self._osd = None
+        self._last_selected_device_per_track = {}
 
         self._control_surface.application().view.add_is_view_visible_listener(
             'Detail', self._on_detail_view_changed)
@@ -208,36 +209,94 @@ class DeviceControllerComponent(DeviceComponent):
     # DEVICE SELECTION
     def _on_device_changed(self):
         if not self._is_locked_to_device:
-            self._selected_track = self.song().view.selected_track
-            self.set_device(self.song().appointed_device)
-            # self.set_device(self._selected_track.view.selected_device)
+            current_track = self.song().view.selected_track
+            new_device = self.song().appointed_device
+            self._selected_track = current_track # Keep internal track consistent
+            self.set_device(new_device)
+            # Update storage when appointed device changes
+            if new_device is not None and current_track is not None:
+                 self._last_selected_device_per_track[current_track] = new_device
+
             if self.is_enabled():
                 self.update()
+
+    # Helper to check if a device belongs to a track (including within racks)
+    def _is_device_on_track(self, device_to_check, track):
+        if not isinstance(device_to_check, Live.Device.Device) or not isinstance(track, Live.Track.Track):
+             return False
+        parent = device_to_check.canonical_parent
+        while parent is not None:
+            if parent == track:
+                return True
+            # Check if parent is a device or chain, continue up
+            if isinstance(parent, (Live.Device.Device, Live.Chain.Chain)):
+                 parent = parent.canonical_parent
+            else: # Reached something else (like Application) before the track
+                 break
+        return False
 
     def on_selected_track_changed(self):
         if not self._is_locked_to_device:
-            self._selected_track = self.song().view.selected_track
-            if (self._selected_track.view.selected_device):
-                self.set_device(self._selected_track.view.selected_device)
+            new_selected_track = self.song().view.selected_track
+            self._selected_track = new_selected_track # Update internal reference
+
+            restored_device = False
+            # Try to restore the last selected device for this track
+            stored_device = self._last_selected_device_per_track.get(new_selected_track)
+
+            if stored_device is not None and self._is_device_on_track(stored_device, new_selected_track):
+                 # Check if the stored device is different from the currently appointed one
+                 # to avoid redundant selection calls if Live already selected it.
+                 if self.song().appointed_device != stored_device:
+                     self.song().view.select_device(stored_device)
+                 # Even if already appointed, ensure our component state is updated
+                 self.set_device(stored_device)
+                 restored_device = True
             else:
-                self.select_first_device()
-            if self.is_enabled():
-                self.update()
+                # Clear invalid entry if it existed
+                if new_selected_track in self._last_selected_device_per_track:
+                    del self._last_selected_device_per_track[new_selected_track]
+
+            # If not restored, check current selection or select first device
+            if not restored_device:
+                current_track_device = new_selected_track.view.selected_device
+                if current_track_device is not None and self._is_device_on_track(current_track_device, new_selected_track):
+                    # If Live already selected a valid device on this track, use it
+                    self.set_device(current_track_device)
+                    # Also update storage for this track
+                    self._last_selected_device_per_track[new_selected_track] = current_track_device
+                else:
+                    # Otherwise, select the first device
+                    self.select_first_device()
+
+            # Update is called within set_device or select_first_device implicitly through set_device
+            # Only call explicitly if needed, but set_device should handle it.
+            # if self.is_enabled():
+            #     self.update()
 
     def select_first_device(self):
         track = self.song().view.selected_track
-        if (track.devices is not None and len(track.devices) > 0):
+        device_to_select = None # Initialize
+        if track.devices is not None and len(track.devices) > 0:
             device_to_select = track.devices[0]
             self.song().view.select_device(device_to_select)
-            self.set_device(device_to_select)
+
+        # Call set_device regardless, even if device_to_select is None (clears previous device)
+        self.set_device(device_to_select)
 
     def set_device(self, device):
         if (device != self._device):
             if self._number_of_parameter_banks() <= self._bank_index:
                 self._bank_index = 0
             self._device = device
-            self.set_device_view()
+            # Only set device view if not in transport mode (where clip looper is active)
+            if not (hasattr(self._control_surface, '_selector') and self._control_surface._selector and hasattr(self._control_surface._selector, '_transport_mode') and self._control_surface._selector._transport_mode):
+                self.set_device_view()
             DeviceComponent.set_device(self, device)
+            # Add the following lines to store the last selected device
+            if self._device is not None and self._selected_track is not None:
+                # Use track itself as key, assumes track lifetime is managed well
+                self._last_selected_device_per_track[self._selected_track] = self._device
 
     def set_device_view(self):
         view = self.application().view
@@ -566,7 +625,7 @@ class DeviceControllerComponent(DeviceComponent):
                             self.selected_track_idx + offset].is_visible:
                             self.song().view.selected_track = \
                             self.song().tracks[self.selected_track_idx + offset]
-                            self.update()
+                            self.on_selected_track_changed()
                             break
 
     def set_prev_track_button(self, button):
@@ -594,7 +653,7 @@ class DeviceControllerComponent(DeviceComponent):
                             self.selected_track_idx - offset].is_visible:
                             self.song().view.selected_track = \
                             self.song().tracks[self.selected_track_idx - offset]
-                            self.update()
+                            self.on_selected_track_changed()
                             break
 
     @property
