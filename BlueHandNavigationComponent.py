@@ -15,6 +15,7 @@ class BlueHandNavigationComponent(object):
         self._prev_device_button = None
         self._next_device_button = None
         self._selected_track = None
+        self._selected_device = None
         self._last_selected_device_per_track = {}
         self.song().add_appointed_device_listener(self._on_appointed_device_changed)
 
@@ -26,6 +27,7 @@ class BlueHandNavigationComponent(object):
         except RuntimeError:
             pass
         self._on_device_selected = None
+        self._selected_device = None
         self._control_surface = None
 
     def song(self):
@@ -37,7 +39,7 @@ class BlueHandNavigationComponent(object):
 
     @property
     def current_device(self):
-        return self.song().appointed_device
+        return self._selected_device
 
     def is_device_on_track(self, device_to_check, track):
         if not isinstance(device_to_check, Live.Device.Device) or not isinstance(track, Live.Track.Track):
@@ -75,6 +77,7 @@ class BlueHandNavigationComponent(object):
         if track is None:
             track = self.song().view.selected_track
         self._selected_track = track
+        self._selected_device = device
         if device is not None and track is not None:
             self._last_selected_device_per_track[track] = device
         elif track in self._last_selected_device_per_track:
@@ -100,8 +103,9 @@ class BlueHandNavigationComponent(object):
             self._notify_device_selected(device, current_track)
         else:
             self._selected_track = current_track
+            self._selected_device = None
             if self._on_device_selected is not None:
-                self._on_device_selected(device, current_track)
+                self._on_device_selected(None, current_track)
 
     def on_selected_track_changed(self):
         if self._is_locked_callback():
@@ -219,7 +223,7 @@ class BlueHandNavigationComponent(object):
         if not self._is_enabled_callback():
             return
 
-        current_device = self.song().appointed_device
+        current_device = self.current_device
         if self._prev_device_button is not None:
             self._prev_device_button.set_on_off_values("Mode.Device.On", "Mode.Device.Off")
             if current_device and self.get_previous_device(current_device):
@@ -247,7 +251,7 @@ class BlueHandNavigationComponent(object):
         assert self._next_device_button is not None
         assert value in range(128)
         if self._is_enabled_callback() and ((not sender.is_momentary()) or (value != 0)):
-            device = self.get_next_device(self.song().appointed_device)
+            device = self.get_next_device(self.current_device)
             if device:
                 self._select_device(device)
 
@@ -264,7 +268,7 @@ class BlueHandNavigationComponent(object):
         assert self._prev_device_button is not None
         assert value in range(128)
         if self._is_enabled_callback() and ((not sender.is_momentary()) or (value != 0)):
-            device = self.get_previous_device(self.song().appointed_device)
+            device = self.get_previous_device(self.current_device)
             if device:
                 self._select_device(device)
 
@@ -281,7 +285,7 @@ class BlueHandNavigationComponent(object):
         return parameter_name in ('device on', 'on') or original_name == 'device on'
 
     def get_target_parameters(self, count=2, skip_device_on_parameter=True, require_continuous=False):
-        device = self.song().appointed_device
+        device = self.current_device
         result = []
         if isinstance(device, Live.Device.Device):
             parameters = list(getattr(device, 'parameters', []))

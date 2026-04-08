@@ -30,6 +30,15 @@ class InstrumentPadsSection(object):
     def scales_toggle_button(self):
         return getattr(self._instrument_controller, '_scales_toggle_button', None)
 
+    @property
+    def track_pad_color_value(self):
+        return getattr(self._instrument_controller, '_track_pad_color_int', None)
+
+    @property
+    def is_scale_overlay_active(self):
+        scales = self.scales
+        return bool(scales is not None and scales.is_enabled())
+
     def disconnect(self):
         self.set_enabled(False)
         self._instrument_controller = None
@@ -97,6 +106,8 @@ class InstrumentPadsSection(object):
         self._instrument_controller.update()
 
     def _prepare_controller(self):
+        if hasattr(self._instrument_controller, 'set_scale_matrix'):
+            self._instrument_controller.set_scale_matrix(self._full_matrix)
         if getattr(self._instrument_controller, '_matrix', None) != self._matrix:
             self._instrument_controller.set_matrix(self._matrix)
         self._instrument_controller.set_physical_note_layout(

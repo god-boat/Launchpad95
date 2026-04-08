@@ -50,10 +50,12 @@ class InstrumentControllerComponent(CompoundComponent):
 		self._note_repeat = note_repeat
 		self._osd = None
 		self._matrix = None
+		self._scale_matrix = None
 		self._side_buttons = side_buttons
 		self._remaining_buttons = []
 		self._matrix_row_offset = 0
 		self._physical_grid_height = 8
+		self._scales_overlay_callback = None
 		self._track_controller = None
 		self.base_channel = 11
 		self._quick_scales = [0, 1, 2, 3, 4, 5, 6, 7, 10, 13, 14, 15, 17, 18, 24]
@@ -256,6 +258,19 @@ class InstrumentControllerComponent(CompoundComponent):
 	
 	def _toggle_note_repeater(self):
 		self._note_repeat.set_enabled(not self._note_repeat.is_enabled())
+
+	def _notify_scales_overlay_changed(self):
+		if self._scales_overlay_callback != None:
+			self._scales_overlay_callback(self._scales.is_enabled())
+
+	def set_scales_overlay_callback(self, callback):
+		self._scales_overlay_callback = callback
+
+	def set_scale_matrix(self, matrix):
+		if self._scale_matrix != matrix:
+			self._scale_matrix = matrix
+			if self._scales != None:
+				self._scales.set_matrix(self._scale_matrix if self._scale_matrix != None else self._matrix)
 		
 
 	# Refresh button and its listener
@@ -303,12 +318,14 @@ class InstrumentControllerComponent(CompoundComponent):
 					self._osd.mode = self._osd_mode_backup + ' - Scale'
 					self._scales_toggle_button.turn_on()
 					self._scales.update()
+				self._notify_scales_overlay_changed()
 			else:
 				self._scales_toggle_button.turn_off()
 				self._scales.set_enabled(False)
 				self._osd.mode = self._osd_mode_backup
 				if(not self._scales.is_quick_scale):
 					self._note_repeat.set_enabled(False)
+				self._notify_scales_overlay_changed()
 				self.update()
 
 
@@ -596,7 +613,7 @@ class InstrumentControllerComponent(CompoundComponent):
 			if old_matrix != matrix:
 				self._matrix.add_value_listener(self._matrix_value_quickscale)
 		if self._scales != None:
-			self._scales.set_matrix(matrix)
+			self._scales.set_matrix(self._scale_matrix if self._scale_matrix != None else matrix)
 		self._update_matrix()
 
 	#Listener, setup drumrack scale mode and load the selected scale for Track/Cip (Disabled)
