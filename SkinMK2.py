@@ -62,6 +62,15 @@ class Colors:
             On = Rgb.RED
             Off = Rgb.BLACK
 
+    class PerformanceOverlay:
+        class FullPads:
+            On = Rgb.LIGHT_BLUE
+            Off = Rgb.LIGHT_BLUE_THIRD
+
+        class StackedXYPads:
+            On = Rgb.PURPLE
+            Off = Rgb.PURPLE_THIRD
+
     class ClipLooper:
         Playhead = Rgb.GREEN_PULSE
         InLoop = Rgb.BLUE_HALF

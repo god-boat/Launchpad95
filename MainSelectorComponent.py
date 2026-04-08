@@ -16,6 +16,7 @@ from _Framework.SceneComponent import SceneComponent
 from .SpecialProSessionComponent import SpecialProSessionComponent
 from .TransportControlComponent import TransportControlComponent
 from .ClipLooperComponent import ClipLooperComponent
+from .PerformanceSurfaceComponent import PerformanceSurfaceComponent
 import Live
 import time
 try:
@@ -53,6 +54,8 @@ class MainSelectorComponent(ModeSelectorComponent):
 		self._pro_session_on = False
 		self._long_press = 500
 		self._last_session_mode_button_press = int(round(time.time() * 1000))
+		self._last_user1_mode_button_press = int(round(time.time() * 1000))
+		self._user1_mode_press_active = False
 		self._aux_scene = None
 		#Non-Matrix buttons
 		self._all_buttons = []
@@ -106,6 +109,8 @@ class MainSelectorComponent(ModeSelectorComponent):
 		#User1 Instrument controller (Scale)
 		self._instrument_controller = InstrumentControllerComponent(self._matrix, self._side_buttons, self._nav_buttons, self._control_surface, self._note_repeat)
 		self._instrument_controller.set_osd(self._osd)
+		self._performance_surface = PerformanceSurfaceComponent(self._matrix, self._side_buttons, self._nav_buttons, self._control_surface, self._instrument_controller)
+		self._performance_surface.set_osd(self._osd)
 		#self._instrument_controller = None
 		
 		#User1 Device controller (Fx or Instrument parameters)
@@ -132,6 +137,10 @@ class MainSelectorComponent(ModeSelectorComponent):
 	def disconnect(self):
 		for button in self._modes_buttons:
 			button.remove_value_listener(self._mode_value)
+
+		if self._performance_surface != None:
+			self._performance_surface.disconnect()
+			self._performance_surface = None
 
 		self._session = None
 		self._zooming = None
@@ -184,6 +193,8 @@ class MainSelectorComponent(ModeSelectorComponent):
 		assert sender in self._modes_buttons
 
 		new_mode = self._modes_buttons.index(sender)
+		if new_mode == 1 and self._handle_user1_mode_value(value, sender):
+			return
 
 		if value != 0:  # Button pressed
 			if new_mode == self._main_mode_index:
@@ -217,6 +228,40 @@ class MainSelectorComponent(ModeSelectorComponent):
 			self._transport_mode = self._transport_mode
 		else:
 			self._transport_mode = False
+
+	def _current_user1_mode(self):
+		return self._get_mode_options(1)[self._sub_mode_list[1]]
+
+	def _handle_user1_mode_value(self, value, sender):
+		now = int(round(time.time() * 1000))
+		if value != 0:
+			if self._main_mode_index == 1 and self._current_user1_mode() == "instrument":
+				self._last_user1_mode_button_press = now
+				self._user1_mode_press_active = True
+				if self._performance_surface != None:
+					self._performance_surface.open_config_overlay()
+					self.update()
+				return True
+			self._user1_mode_press_active = False
+			return False
+
+		if not self._user1_mode_press_active:
+			return False
+
+		self._user1_mode_press_active = False
+		press_duration = now - self._last_user1_mode_button_press
+		overlay_interaction = False
+		if self._performance_surface != None:
+			overlay_interaction = self._performance_surface.consume_overlay_interaction()
+
+		if self._performance_surface != None and self._performance_surface.is_config_overlay_active():
+			self._performance_surface.close_config_overlay()
+
+		if press_duration < self._long_press and not overlay_interaction:
+			self._sub_mode_list[1] = (self._sub_mode_list[1] + 1) % len(self._get_mode_options(1))
+
+		self.update()
+		return True
 
 	def _get_mode_options(self, mode):
 		if mode == 1:
@@ -373,7 +418,7 @@ class MainSelectorComponent(ModeSelectorComponent):
 		as_active = True
 		as_enabled = True
 		if mode == "instrument":
-			self._control_surface.show_message("INSTRUMENT MODE")
+			self._control_surface.show_message("PERFORMANCE MODE")
 			self._clear_transport_controls()
 			self._setup_session(not as_active, not as_enabled)
 			self._setup_step_sequencer(not as_active)
@@ -542,7 +587,8 @@ class MainSelectorComponent(ModeSelectorComponent):
 		
 		
 	def _setup_instrument_controller(self, as_active):
-		if self._instrument_controller != None:
+		target = self._performance_surface if self._performance_surface != None else self._instrument_controller
+		if target != None:
 			if as_active:
 				self._activate_matrix(False) #Disable matrix buttons (clip slots)
 				self._activate_scene_buttons(True)#Enable side buttons
@@ -556,7 +602,9 @@ class MainSelectorComponent(ModeSelectorComponent):
 						button = self._matrix.get_button(track_index, scene_index)
 						button.use_default_message()# Reset to original channel
 						button.force_next_send()#Flush
-			self._instrument_controller.set_enabled(as_active)#Enable/disable instrument controller
+			target.set_enabled(as_active)#Enable/disable performance surface
+			if as_active and hasattr(target, 'update'):
+				target.update()
 
 	def _setup_device_controller(self, as_active):
 		if self._device_controller != None:

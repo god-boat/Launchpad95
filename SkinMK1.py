@@ -53,6 +53,15 @@ class Colors:
             On = Rgb.ORANGE
             Off = Rgb.ORANGE_HALF
 
+    class PerformanceOverlay:
+        class FullPads:
+            On = Rgb.AMBER
+            Off = Rgb.AMBER_THIRD
+
+        class StackedXYPads:
+            On = Rgb.RED
+            Off = Rgb.RED_THIRD
+
     class Session:
         # scene
         SceneTriggered = Rgb.GREEN_BLINK
