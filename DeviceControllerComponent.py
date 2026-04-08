@@ -1,6 +1,7 @@
 from _Framework.DeviceComponent import DeviceComponent
 from _Framework.ButtonElement import ButtonElement
 import sys
+from .BlueHandNavigationComponent import BlueHandNavigationComponent
 from .DeviceControllerStripProxy import DeviceControllerStripProxy
 import time
 import Live
@@ -55,7 +56,7 @@ class DeviceControllerComponent(DeviceComponent):
         self._is_active = False
         self._force = True
         self._osd = None
-        self._last_selected_device_per_track = {}
+        self._blue_hand_navigation = None
 
         self._control_surface.application().view.add_is_view_visible_listener(
             'Detail', self._on_detail_view_changed)
@@ -64,6 +65,13 @@ class DeviceControllerComponent(DeviceComponent):
 
         # self._remaining_buttons = None UNUSED
         DeviceComponent.__init__(self)
+
+        self._blue_hand_navigation = BlueHandNavigationComponent(
+            control_surface=self._control_surface,
+            is_enabled_callback=self.is_enabled,
+            is_locked_callback=lambda: self._is_locked_to_device,
+            on_device_selected=self._on_device_changed,
+            set_device_view_callback=self._show_device_view_if_allowed)
 
         # Sliders
         self._sliders = []
@@ -98,8 +106,6 @@ class DeviceControllerComponent(DeviceComponent):
             self.set_lock_button4(side_buttons[7])
 
 
-        # selected device listener
-        self.song().add_appointed_device_listener(self._on_device_changed)
         self._control_surface.set_device_component(self)
         self._restore_locked_devices_from_tags()
 
@@ -108,8 +114,10 @@ class DeviceControllerComponent(DeviceComponent):
             'Detail', self._on_detail_view_changed)
         self._control_surface.application().view.remove_is_view_visible_listener(
             'Detail/Clip', self._on_views_changed)
+        if self._blue_hand_navigation is not None:
+            self._blue_hand_navigation.disconnect()
+            self._blue_hand_navigation = None
         self._control_surface.set_device_component(None)
-        self.song().remove_appointed_device_listener(self._on_device_changed)
         # LiveDeviceComponent.disconnect(self)
         self._prev_track_button = None
         self._next_track_button = None
@@ -211,55 +219,26 @@ class DeviceControllerComponent(DeviceComponent):
             self._osd.update()
 
     # DEVICE SELECTION
-    def _on_device_changed(self):
+    def _on_device_changed(self, device=None, track=None):
         if not self._is_locked_to_device:
-            current_track = self.song().view.selected_track
-            new_device = self.song().appointed_device
+            current_track = self.song().view.selected_track if track is None else track
+            new_device = self.song().appointed_device if track is None and device is None else device
             self._selected_track = current_track # Keep internal track consistent
             self.set_device(new_device)
-            # Update storage when appointed device changes
-            if new_device is not None and current_track is not None:
-                 self._last_selected_device_per_track[current_track] = new_device
-
             if self.is_enabled():
                 self.update()
 
     # Helper to check if a device belongs to a track (including within racks)
     def _is_device_on_track(self, device_to_check, track):
-        if not isinstance(device_to_check, Live.Device.Device) or not isinstance(track, Live.Track.Track):
-             return False
-        parent = device_to_check.canonical_parent
-        while parent is not None:
-            if parent == track:
-                return True
-            # Check if parent is a device or chain, continue up
-            if isinstance(parent, (Live.Device.Device, Live.Chain.Chain)):
-                 parent = parent.canonical_parent
-            else: # Reached something else (like Application) before the track
-                 break
-        return False
+        return self._blue_hand_navigation.is_device_on_track(device_to_check, track)
 
     def _get_device_track(self, device):
-        if not isinstance(device, Live.Device.Device):
-            return None
-        for track in tuple(self.song().tracks) + tuple(self.song().return_tracks):
-            if self._is_device_on_track(device, track):
-                return track
-        return None
+        return self._blue_hand_navigation.get_device_track(device)
 
     def _focus_locked_device(self, device):
         if not self._focus_locked_device_on_select:
             return
-        if not isinstance(device, Live.Device.Device):
-            return
-
-        device_track = self._get_device_track(device)
-        if device_track is not None and self.song().view.selected_track != device_track:
-            self.song().view.selected_track = device_track
-        if self.song().appointed_device != device:
-            self.song().view.select_device(device)
-        if not (hasattr(self._control_surface, '_selector') and self._control_surface._selector and hasattr(self._control_surface._selector, '_transport_mode') and self._control_surface._selector._transport_mode):
-            self.set_device_view()
+        self._blue_hand_navigation.focus_device(device)
 
     def _lock_restore_tag(self, index):
         return self._lock_restore_tag_prefix + str(index + 1)
@@ -309,60 +288,10 @@ class DeviceControllerComponent(DeviceComponent):
 
     def on_selected_track_changed(self):
         if not self._is_locked_to_device:
-            new_selected_track = self.song().view.selected_track
-            self._selected_track = new_selected_track # Update internal reference
-
-            restored_device = False
-            # Try to restore the last selected device for this track
-            stored_device = self._last_selected_device_per_track.get(new_selected_track)
-
-            if stored_device is not None and self._is_device_on_track(stored_device, new_selected_track):
-                 stored_device = self._normalize_device_for_navigation(stored_device)
-                 # Check if the stored device is different from the currently appointed one
-                 # to avoid redundant selection calls if Live already selected it.
-                 if stored_device is not None:
-                     if self.song().appointed_device != stored_device:
-                         self.song().view.select_device(stored_device)
-                     # Even if already appointed, ensure our component state is updated
-                     self.set_device(stored_device)
-                     restored_device = True
-            else:
-                # Clear invalid entry if it existed
-                if new_selected_track in self._last_selected_device_per_track:
-                    del self._last_selected_device_per_track[new_selected_track]
-
-            # If not restored, check current selection or select first device
-            if not restored_device:
-                current_track_device = new_selected_track.view.selected_device
-                if current_track_device is not None and self._is_device_on_track(current_track_device, new_selected_track):
-                    current_track_device = self._normalize_device_for_navigation(current_track_device)
-                    # If Live already selected a valid device on this track, use it
-                    if current_track_device is not None:
-                        if self.song().appointed_device != current_track_device:
-                            self.song().view.select_device(current_track_device)
-                        self.set_device(current_track_device)
-                        # Also update storage for this track
-                        self._last_selected_device_per_track[new_selected_track] = current_track_device
-                    else:
-                        self.select_first_device()
-                else:
-                    # Otherwise, select the first device
-                    self.select_first_device()
-
-            # Update is called within set_device or select_first_device implicitly through set_device
-            # Only call explicitly if needed, but set_device should handle it.
-            # if self.is_enabled():
-            #     self.update()
+            self._blue_hand_navigation.on_selected_track_changed()
 
     def select_first_device(self):
-        track = self.song().view.selected_track
-        device_to_select = None # Initialize
-        if track.devices is not None and len(track.devices) > 0:
-            device_to_select = track.devices[0]
-            self.song().view.select_device(device_to_select)
-
-        # Call set_device regardless, even if device_to_select is None (clears previous device)
-        self.set_device(device_to_select)
+        self._blue_hand_navigation.select_first_device()
 
     def set_device(self, device):
         if (device != self._device):
@@ -370,13 +299,8 @@ class DeviceControllerComponent(DeviceComponent):
                 self._bank_index = 0
             self._device = device
             # Only set device view if not in transport mode (where clip looper is active)
-            if not (hasattr(self._control_surface, '_selector') and self._control_surface._selector and hasattr(self._control_surface._selector, '_transport_mode') and self._control_surface._selector._transport_mode):
-                self.set_device_view()
+            self._show_device_view_if_allowed()
             DeviceComponent.set_device(self, device)
-            # Add the following lines to store the last selected device
-            if self._device is not None and self._selected_track is not None:
-                # Use track itself as key, assumes track lifetime is managed well
-                self._last_selected_device_per_track[self._selected_track] = self._device
 
     def set_device_view(self):
         view = self.application().view
@@ -384,6 +308,10 @@ class DeviceControllerComponent(DeviceComponent):
             'Detail/DeviceChain'):
             view.show_view('Detail')
             view.show_view('Detail/DeviceChain')
+
+    def _show_device_view_if_allowed(self):
+        if not (hasattr(self._control_surface, '_selector') and self._control_surface._selector and hasattr(self._control_surface._selector, '_transport_mode') and self._control_surface._selector._transport_mode):
+            self.set_device_view()
 
     # UPDATE
     def update(self):
@@ -751,145 +679,46 @@ class DeviceControllerComponent(DeviceComponent):
     # DEVICES
 
     def _is_rack_open_for_navigation(self, device):
-        if not isinstance(device, Live.Device.Device):
-            return False
-        if not getattr(device, 'can_have_chains', False) or len(device.chains) == 0:
-            return False
-        if not hasattr(device, 'view'):
-            return False
-        if getattr(device.view, 'is_collapsed', False):
-            return False
-        if not getattr(device.view, 'is_showing_chain_devices', False):
-            return False
-        return device.view.selected_chain is not None
+        return self._blue_hand_navigation.is_rack_open_for_navigation(device)
 
     def _visible_device_parent(self, device):
-        if self._is_rack_open_for_navigation(device):
-            return device.view.selected_chain
-        return None
+        return self._blue_hand_navigation.visible_device_parent(device)
 
     def _collect_visible_devices(self, track_or_chain, visible_devices=None):
-        if visible_devices is None:
-            visible_devices = []
-        devices = list(track_or_chain.devices) if track_or_chain is not None and hasattr(track_or_chain, 'devices') else []
-        for child_device in devices:
-            visible_devices.append(child_device)
-            nested_parent = self._visible_device_parent(child_device)
-            if nested_parent is not None:
-                self._collect_visible_devices(nested_parent, visible_devices)
-        return visible_devices
+        return self._blue_hand_navigation.collect_visible_devices(track_or_chain, visible_devices)
 
     def _visible_devices(self):
-        track = self.selected_track()
-        if track is None:
-            return []
-        return self._collect_visible_devices(track, [])
+        return self._blue_hand_navigation.visible_devices()
 
     def _normalize_device_for_navigation(self, device, visible_devices=None):
-        if not isinstance(device, Live.Device.Device):
-            return None
-        if visible_devices is None:
-            visible_devices = self._visible_devices()
-        if device in visible_devices:
-            return device
-        current_device = device
-        while isinstance(current_device, Live.Device.Device):
-            parent = current_device.canonical_parent
-            if not isinstance(parent, Live.Chain.Chain):
-                break
-            current_device = parent.canonical_parent
-            if current_device in visible_devices:
-                return current_device
-        return None
+        return self._blue_hand_navigation.normalize_device_for_navigation(device, visible_devices)
 
     def _get_device_by_offset(self, device, offset):
-        visible_devices = self._visible_devices()
-        if len(visible_devices) == 0:
-            return None
-        if device is None:
-            return visible_devices[0] if offset > 0 else visible_devices[-1]
-        normalized_device = self._normalize_device_for_navigation(device, visible_devices)
-        if normalized_device is None:
-            return visible_devices[0] if offset > 0 else visible_devices[-1]
-        index = visible_devices.index(normalized_device) + offset
-        if index >= 0 and index < len(visible_devices):
-            return visible_devices[index]
-        return None
+        return self._blue_hand_navigation.get_device_by_offset(device, offset)
 
     def update_device_buttons(self):
-        if self.is_enabled():
-            if self._prev_device_button is not None:
-                self._prev_device_button.set_on_off_values("Mode.Device.On", "Mode.Device.Off")
-                if self.song().appointed_device:
-                    if self._get_previous_device(self.song().appointed_device):
-                        self._prev_device_button.turn_on()
-                    else:
-                        self._prev_device_button.turn_off()
-                else:
-                    self._prev_device_button.turn_off()
-
-            if self._next_device_button is not None:
-                self._next_device_button.set_on_off_values("Mode.Device.On", "Mode.Device.Off")
-                if self.song().appointed_device:
-                    if self._get_next_device(self.song().appointed_device):
-                        self._next_device_button.turn_on()
-                    else:
-                        self._next_device_button.turn_off()
-                else:
-                    self._next_device_button.turn_off()
+        self._blue_hand_navigation.update_device_buttons()
 
     # DEVICE NAVIGATION LISTENERES
     def set_next_device_button(self, button):
-        assert (isinstance(button, (ButtonElement, type(None))))
-        if (self._next_device_button != button):
-            if (self._next_device_button is not None):
-                self._next_device_button.remove_value_listener(
-                    self._next_device_value)
-            self._next_device_button = button
-            if (self._next_device_button is not None):
-                assert isinstance(button, ButtonElement)
-                self._next_device_button.add_value_listener(
-                    self._next_device_value, identify_sender=True)
+        self._next_device_button = button
+        self._blue_hand_navigation.set_next_device_button(button)
 
     def _next_device_value(self, value, sender):
-        assert (self._next_device_button is not None)
-        assert (value in range(128))
-        if self.is_enabled():
-            if ((not sender.is_momentary()) or (value != 0)):
-                if self.selected_track() is not None:
-                    device = self._get_next_device(self.song().appointed_device)
-                    if device:
-                        self.song().view.select_device(device)
-                        self.update()
+        self._blue_hand_navigation.handle_next_device_value(value, sender)
 
     def set_prev_device_button(self, button):
-        assert (isinstance(button, (ButtonElement, type(None))))
-        if (self._prev_device_button != button):
-            if (self._prev_device_button is not None):
-                self._prev_device_button.remove_value_listener(
-                    self._prev_device_value)
-            self._prev_device_button = button
-            if (self._prev_device_button is not None):
-                assert isinstance(button, ButtonElement)
-                self._prev_device_button.add_value_listener(
-                    self._prev_device_value, identify_sender=True)
+        self._prev_device_button = button
+        self._blue_hand_navigation.set_prev_device_button(button)
 
     def _prev_device_value(self, value, sender):
-        assert (self._prev_device_button is not None)
-        assert (value in range(128))
-        if self.is_enabled():
-            if ((not sender.is_momentary()) or (value != 0)):
-                if self.selected_track() is not None:
-                    device = self._get_previous_device(self.song().appointed_device)
-                    if device:
-                        self.song().view.select_device(device)
-                        self.update()
+        self._blue_hand_navigation.handle_prev_device_value(value, sender)
 
     def _get_next_device(self, device):
-        return self._get_device_by_offset(device, 1)
+        return self._blue_hand_navigation.get_next_device(device)
 
     def _get_previous_device(self, device):
-        return self._get_device_by_offset(device, -1)
+        return self._blue_hand_navigation.get_previous_device(device)
 
     @property
     def selected_device_idx(self):
