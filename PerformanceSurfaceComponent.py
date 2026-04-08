@@ -1,6 +1,7 @@
 from _Framework.ButtonMatrixElement import ButtonMatrixElement
 
 from .BlueHandNavigationComponent import BlueHandNavigationComponent
+from .InstrumentPadsSection import InstrumentPadsSection
 from .PerformanceConfigOverlayComponent import (
     FULL_PADS_LAYOUT,
     STACKED_XY_PADS_LAYOUT,
@@ -22,6 +23,12 @@ class PerformanceSurfaceComponent(object):
         self._top_buttons = top_buttons
         self._control_surface = control_surface
         self._instrument_controller = instrument_controller
+        self._pads_section = InstrumentPadsSection(
+            instrument_controller=instrument_controller,
+            matrix=self._matrix,
+            full_matrix=self._matrix,
+            physical_row_offset=0,
+            physical_grid_height=self._matrix.height())
         self._osd = None
         self._enabled = False
         self._config_mode = False
@@ -60,7 +67,9 @@ class PerformanceSurfaceComponent(object):
 
         self._overlay.disconnect()
         self._blue_hand_navigation.disconnect()
+        self._pads_section.disconnect()
         self._instrument_controller = None
+        self._pads_section = None
         self._control_surface = None
         self._osd = None
 
@@ -69,6 +78,8 @@ class PerformanceSurfaceComponent(object):
 
     def set_osd(self, osd):
         self._osd = osd
+        if self._pads_section is not None:
+            self._pads_section.set_osd(osd)
 
     @property
     def layout_id(self):
@@ -98,6 +109,10 @@ class PerformanceSurfaceComponent(object):
     def _set_layout(self, layout_id, close_overlay):
         if layout_id not in VALID_PERFORMANCE_LAYOUTS:
             return
+
+        if layout_id == STACKED_XY_PADS_LAYOUT:
+            self._control_surface.show_message('STACKED XY + PADS NOT IMPLEMENTED YET')
+            layout_id = FULL_PADS_LAYOUT
 
         layout_changed = self._layout_id != layout_id
         self._layout_id = layout_id
@@ -136,7 +151,7 @@ class PerformanceSurfaceComponent(object):
             self.update()
 
     def update(self):
-        if not self._enabled or self._instrument_controller is None:
+        if not self._enabled or self._pads_section is None:
             return
 
         if self._config_mode:
@@ -145,7 +160,7 @@ class PerformanceSurfaceComponent(object):
             self._update_active_layout()
 
     def _disable_surface(self):
-        if self._instrument_controller is None:
+        if self._pads_section is None:
             return
 
         self._config_mode = False
@@ -153,25 +168,26 @@ class PerformanceSurfaceComponent(object):
         self._overlay.set_enabled(False)
         self._close_instrument_overlays()
         self._clear_navigation_assignments()
-        self._instrument_controller.set_enabled(False)
+        self._pads_section.set_enabled(False)
 
     def _update_config_overlay(self):
         self._restore_matrix_messages()
-        self._instrument_controller.set_enabled(False)
+        self._pads_section.set_enabled(False)
         self._overlay.set_selected_layout(self._layout_id)
         self._overlay.set_enabled(True)
         self._update_overlay_osd()
 
     def _update_active_layout(self):
         self._overlay.set_enabled(False)
-        if getattr(self._instrument_controller, '_matrix', None) != self._matrix:
-            self._instrument_controller.set_matrix(self._matrix)
-        self._instrument_controller.set_physical_note_layout(0, self._matrix.height())
+        self._pads_section.set_matrix(self._matrix, full_matrix=self._matrix)
+        self._pads_section.set_physical_note_layout(0, self._matrix.height())
         self._apply_navigation_layout()
-        self._instrument_controller.set_enabled(True)
-        self._instrument_controller.update()
+        if not self._pads_section.is_enabled():
+            self._pads_section.set_enabled(True)
+        else:
+            self._pads_section.update()
 
-        track_controller = getattr(self._instrument_controller, '_track_controller', None)
+        track_controller = self._pads_section.track_controller
         if track_controller is not None:
             track_controller.update()
 
@@ -181,7 +197,7 @@ class PerformanceSurfaceComponent(object):
         self._update_layout_osd()
 
     def _apply_navigation_layout(self):
-        track_controller = getattr(self._instrument_controller, '_track_controller', None)
+        track_controller = self._pads_section.track_controller
         if track_controller is None:
             return
 
@@ -223,14 +239,7 @@ class PerformanceSurfaceComponent(object):
                 button.force_next_send()
 
     def _close_instrument_overlays(self):
-        scales = getattr(self._instrument_controller, '_scales', None)
-        if scales is None or not scales.is_enabled():
-            return
-
-        if self._instrument_controller.is_enabled():
-            self._instrument_controller._scales_toggle(0, getattr(self._instrument_controller, '_scales_toggle_button', None))
-        else:
-            scales.set_enabled(False)
+        self._pads_section.close_overlays()
 
     def _update_overlay_osd(self):
         if self._osd is None:
