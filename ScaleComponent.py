@@ -49,9 +49,21 @@ class ScaleComponent(ControlSurfaceComponent):
 		self._minor_modes = [1, 13, 14]#Natural, Harmonic, Melodic
 		
 		super(ScaleComponent, self).__init__(*a, **k)
+		self._initialize_from_song()
 		# Register listeners on init, regardless of initial enabled state
 		self._register_scale_listeners()
 		self.set_enabled(enabled) # Keep this to set initial state if needed
+
+	def _initialize_from_song(self):
+		try:
+			current_root = self.song().root_note
+			current_scale_name = self.song().scale_name
+		except RuntimeError:
+			return
+
+		self.set_key(current_root, False, True)
+		if current_scale_name in self._modus_names:
+			self.set_modus(self._modus_names.index(current_scale_name), False, True)
 
 	def disconnect(self):
 		""" Clean up resources, including listeners, when the component is disconnected """
