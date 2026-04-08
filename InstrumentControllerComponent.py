@@ -52,6 +52,8 @@ class InstrumentControllerComponent(CompoundComponent):
 		self._matrix = None
 		self._side_buttons = side_buttons
 		self._remaining_buttons = []
+		self._matrix_row_offset = 0
+		self._physical_grid_height = 8
 		self._track_controller = None
 		self.base_channel = 11
 		self._quick_scales = [0, 1, 2, 3, 4, 5, 6, 7, 10, 13, 14, 15, 17, 18, 24]
@@ -563,6 +565,26 @@ class InstrumentControllerComponent(CompoundComponent):
 			self._osd.info[1] = " "
 			self._osd.update()
 
+	def set_physical_note_layout(self, row_offset = 0, total_rows = 8):
+		self._matrix_row_offset = max(0, row_offset)
+		self._physical_grid_height = max(1, total_rows)
+		self._update_matrix()
+
+	def _physical_row_for_button(self, row):
+		return row + self._matrix_row_offset
+
+	def _pattern_row_for_button(self, row):
+		return (self._physical_grid_height - 1) - self._physical_row_for_button(row)
+
+	def _drum_note_for_button(self, x, row):
+		physical_row = self._physical_row_for_button(row)
+		if x < 4:
+			return 16 * (self._scales._octave - 1) + x + 4 * (self._physical_grid_height - physical_row)
+		return 16 * (self._scales._octave - 1) + 32 + x + 4 * ((self._physical_grid_height - 1) - physical_row)
+
+	def _melodic_note_info_for_button(self, pattern, x, row):
+		return pattern.note(x, self._pattern_row_for_button(row))
+
 	# Refresh matrix and its listener
 	def set_matrix(self, matrix):
 		old_matrix = self._matrix
@@ -658,15 +680,10 @@ class InstrumentControllerComponent(CompoundComponent):
 				
 				for button, (x, y) in self._matrix.iterbuttons():
 					if button:
-						note = 0
-
-						if(x < 4):
-							note = 16 * (self._scales._octave -1)+ x + 4 * (8 - y)
-						else:
-							note = 16 * (self._scales._octave -1) + 32 + x + 4 * (7 - y)	 
+						note = self._drum_note_for_button(x, y)
 
 						if self._note_repeat_selector:
-							if(x >= 4 and y<4):
+							if(x >= 4 and self._physical_row_for_button(y) < 4):
 								note = -99 #Avoid light errors
 
 						if note < 128 and note >= 0:
@@ -900,14 +917,13 @@ class InstrumentControllerComponent(CompoundComponent):
 								button.turn_off()
 					
 				pattern = self._scales.get_pattern()
-				max_j = self._matrix.width() - 1
 				a = 0
 				if self._scales.is_chromatic:
 					a= 63
 				for button, (i, j) in self._matrix.iterbuttons():
 					if button and (not self._scales.is_quick_scale or j > 1):
 						a = a +1
-						note_info = pattern.note(i, max_j - j)
+						note_info = self._melodic_note_info_for_button(pattern, i, j)
 						button.set_enabled(False) # Assume it's a note button unless proven otherwise
 						button.set_channel(non_feedback_channel) # Default channel
 
