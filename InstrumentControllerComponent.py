@@ -92,7 +92,6 @@ class InstrumentControllerComponent(CompoundComponent):
 
 		self._scales = self.register_component(ScaleComponent(self._control_surface))
 		#self._scales.set_enabled(False)
-		self._scales.set_matrix(matrix)
 		self._scales.set_osd(self._osd)
 		
 		self.set_matrix(matrix)
@@ -566,15 +565,16 @@ class InstrumentControllerComponent(CompoundComponent):
 
 	# Refresh matrix and its listener
 	def set_matrix(self, matrix):
+		old_matrix = self._matrix
+		if old_matrix != matrix and old_matrix != None:
+			old_matrix.remove_value_listener(self._matrix_value_quickscale)
 		self._matrix = matrix
-		if matrix:
-			matrix.reset()
-		if (matrix != self._matrix):
-			if (self._matrix != None):
-				self._matrix.remove_value_listener(self._matrix_value_quickscale)
-		self._matrix = matrix
-		if (self._matrix != None):
-			self._matrix.add_value_listener(self._matrix_value_quickscale)
+		if self._matrix != None:
+			self._matrix.reset()
+			if old_matrix != matrix:
+				self._matrix.add_value_listener(self._matrix_value_quickscale)
+		if self._scales != None:
+			self._scales.set_matrix(matrix)
 		self._update_matrix()
 
 	#Listener, setup drumrack scale mode and load the selected scale for Track/Cip (Disabled)
